@@ -1,6 +1,6 @@
 # FairSurvival_CreditRisk
 
-DynamicFair_CreditScoring/
+
 │
 ├── README.md
 ├── requirements.txt
