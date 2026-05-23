@@ -3,8 +3,21 @@ create_theta <- function(data, scenario, coeff){
   X <- data[, -ncol(data)] 
   S <- data[, ncol(data)] 
   if (scenario == "direct"){
-    Fstar <- X %*% coeff$Beta1 + coeff$Beta0[1]
-    Fstar <- Fstar + coeff$BetaS * S + rnorm(length(S), mean = 0, sd = coeff$NoiseS * S)
+      Fstar <- X %*% coeff$Beta1 + coeff$Beta0[1] + coeff$BetaS * S
+      theta <- exp(Fstar)
+      
+      nperiod <- 12
+      nsub    <- nrow(data) / nperiod
+      # rumore per soggetto, non per riga
+
+      noise_per_sub <- rnorm(nsub, mean = 0, sd = coeff$NoiseS)
+      noise_rep     <- rep(noise_per_sub, each = nperiod)
+      S_first       <- S[seq(1, nrow(data), by = nperiod)]
+      S_rep         <- rep(S_first, each = nperiod)
+      
+      theta <- theta * exp(noise_rep * S_rep)
+      return(theta)
+      
   }
   else if (scenario == "fair" | scenario == "proxy" | scenario == "temporal"){
      Fstar <- X %*% coeff$Beta1 + coeff$Beta0[1] 
