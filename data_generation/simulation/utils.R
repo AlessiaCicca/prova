@@ -1,5 +1,13 @@
-###### ======== autocorrelation: matsigma in traindtv_autocorr_gnrt.R ======== ######
-# Mantain 2TI4TV + Strong (to financial domain)
+# =============================================================================
+# Adapted from:
+#   "Dynamic Estimation with Random Forests for Discrete-Time Survival Data" (2021)
+# Modifications:
+#   - Fixed simulation parameters
+#   - Added 4 fairness scenarios (fair, direct, proxy, temporal)
+# 
+# Mantain nperiod=8, model=linear and distribution=Exp (easiest), censor.rate = 10% (more realistic) 
+# and SNR (How strong is the signal compared to the noise) = "low" (to financial domain)
+# =============================================================================
 
 
 create_matsigma <- function(){
@@ -10,17 +18,13 @@ create_matsigma <- function(){
   return(matsigma)
 }
 
-
-
 create_matsigma_by_group <- function(S){
-  # S=0: segnale forte, feature predittive ben separate
+  # S=0: HIGH SIGNAL matrix(.2, 6, 6) 
   matsigma_S0 <- .7 * diag(6) + matrix(.2, 6, 6)
   matsigma_S0[1,] <- c(1,0,0,0,0,0)
   matsigma_S0[2,] <- c(0,1,0,0,0,0)
   
-  # S=1: feature predittive più correlate tra loro
-  # → meno informazione indipendente
-  # → più difficile discriminare positivi da negativi
+  # S=1: LOW SIGNAL matrix(.05, 6, 6)
   matsigma_S1 <- .9 * diag(6) + matrix(.05, 6, 6)
   matsigma_S1[1,] <- c(1,0,0,0,0,0)
   matsigma_S1[2,] <- c(0,1,0,0,0,0)
@@ -29,34 +33,22 @@ create_matsigma_by_group <- function(S){
 }
 
 
-
-###### ======== censoring rate: Censor.time in traindtv_autocorr_gnrt.R ======== ######
-# Mantain nperiod=8, model=linear and distribution=Exp (easiest), censor.rate = 10% (more realistic) 
-# and SNR (How strong is the signal compared to the noise) = "low" (to financial domain)
-#
 # It's null -> The only source of censoring in the new script is the natural censoring arising from the compressed chngpt (the rate = 0.80 mechanism discussed before). 
 # There is no additional administrative censoring imposed on top. 
-#
 # setting Censor.time = Inf is not an arbitrary simplification, but rather the natural result of the calibration process:
 # the natural censoring induced by findsurvint with rate = 0.80 is already sufficient to achieve the target of 80% censoring, 
 # without the need for any additional administrative censoring.
+
 create_ctime <- function(nsub){
   Censor.time <- rep(Inf, nsub)
   return(Censor.time)
 }
 
-###### ======== create coefficient lists: Coeff in Timevarying_gnrt.R ======== ######
-# Mantain nperiod=8 (using 12), model=linear and distribution=Exp (easiest), censor.rate = 10% (more realistic) 
-# and SNR (How strong is the signal compared to the noise) = "low" (to financial domain)
-# Add 4 scenario:
-# 
-# Z_t = matsigma Z_{t-1} + Gamma * S + epsilon_t; 
-# theta = exp(data * Beta1 + Beta0 + S * BetaS)
-#
+
 # FAIR: No discrimination -> BetaS=0 Gamma=0
-# DIRECT: Sensitive variable directly influences risk Theta -> BetaS=0.3 Gamma=0
-# PROXY: Sensitive variable influences covariates Zt -> BetaS=0 Gamma=0.3
-# TEMPORAL:  Sensitive variable influences covariates Zt and bias increases over time -> BetaS=0 Gamma=0.3 (later * t)
+# DIRECT: Sensitive variable directly influences risk Theta -> BetaS=!0 Gamma=0
+# PROXY: Sensitive variable influences covariates Zt -> BetaS=0 Gamma!=0
+# TEMPORAL:  Sensitive variable influences covariates Zt and bias increases over time -> BetaS=0 Gamma!=0 (later * t)
 
 create_coeff <- function(nsub, scenario){
   NoiseS <- 1.5
@@ -78,7 +70,7 @@ create_coeff <- function(nsub, scenario){
     BetaS=0.8
   }
   else if(scenario == "proxy" | scenario == "temporal"){
-    Gamma= 0.5  # X2↓, X4↓, X6↑ → tutti aumentano Fstar per S=1
+    Gamma= 0.5  
     BetaS=0
   }
   else {
