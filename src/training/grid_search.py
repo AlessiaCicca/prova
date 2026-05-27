@@ -27,13 +27,14 @@ warnings.filterwarnings("ignore")
 DEFAULT_BETAS  = [0.0, 0.3, 0.5, 0.7, 1.0]
 DEFAULT_ALPHAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
 
+
 MODEL_STYLES = {
     "M_STATIC":  {"color": "#3A6BC4", "marker": "o", "coef_label": "β"},
     "M_DYNAMIC": {"color": "#D4612A", "marker": "s", "coef_label": "α"},
 }
 
 
-
+# MAIN RUN to which we will assign all the different value for the coefficients
 def _run_cv(
     model_tag,
     X, y, grp, sens, time_arr,
@@ -43,14 +44,18 @@ def _run_cv(
     eo_mode_d="mean",
     schedule_mode_d="flat"):
 
+    # Seed setup    
     np.random.seed(42)
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
 
+    # Splits the data into 5 folds ensuring that the same loan is not both in train and test
     gkf       = GroupKFold(n_splits=n_folds)
+    # Empty Array to save OOF predictions
     oof_preds = np.zeros(len(y), dtype=np.float64)
 
+    # For each fold: train the model on the train, predict on the test
     for tr_idx, te_idx in gkf.split(X, y, grp):
         time_tr = time_arr[tr_idx] if time_arr is not None else None
         p_te, _, _, _ = train_mlp(
@@ -65,7 +70,8 @@ def _run_cv(
             verbose         = False,
         )
         oof_preds[te_idx] = p_te
-
+        
+    # Find the threshold that maximize F1
     th = find_best_threshold(y.astype(int), oof_preds)
 
     # Mean OOF AUC
@@ -152,6 +158,7 @@ def run_grid_search(
     print("=" * 60)
     print("GRID SEARCH — M_STATIC")
     print("=" * 60)
+    # Passing different values of β while α=0
     for beta in betas:
         print(f"  beta={beta:.2f} ...", end=" ", flush=True)
         r = _run_cv(
@@ -168,6 +175,7 @@ def run_grid_search(
     print("\n" + "=" * 60)
     print("GRID SEARCH — M_DYNAMIC")
     print("=" * 60)
+    # Passing different values of α while β=0
     for alpha in alphas:
         print(f"  alpha={alpha:.2f} ...", end=" ", flush=True)
         r = _run_cv(
@@ -188,73 +196,71 @@ def run_grid_search(
     print(df_grid.to_string(index=False))
 
 
-    _print_best_points(df_grid, out_dir)
+    print_best_points(df_grid, out_dir)
 
     return df_grid
 
+# Compute best trade-off point for each model
+def _compute_best(df_grid):
+    # min-max to perform normalization
+    auc_min, auc_max = df_grid["auc_mean"].min(), df_grid["auc_mean"].max()
+    sep_min, sep_max = df_grid["separation_auc"].min(), df_grid["separation_auc"].max()
 
-def _print_best_points(df_grid, out_dir):
-    auc_min = df_grid["auc_mean"].min()
-    auc_max = df_grid["auc_mean"].max()
-    sep_min = df_grid["separation_auc"].min()
-    sep_max = df_grid["separation_auc"].max()
+    def trade_score(auc, sep):
+        # Normalization: same scale to be compared
+        auc_n = (auc - auc_min) / (auc_max - auc_min + 1e-9)
+        sep_n = (sep - sep_min) / (sep_max - sep_min + 1e-9)
+        return auc_n - sep_n
 
-    print("\n=== BEST POINTS (max AUC − normalised Separation AUC) ===")
-    summary_rows = []
+    best_per_model = {}
     for model_name in ["M_STATIC", "M_DYNAMIC"]:
-        sub = (
-            df_grid[df_grid["model"] == model_name]
-            .dropna(subset=["auc_mean", "separation_auc"])
-            .reset_index(drop=True)
-        )
+        sub = df_grid[df_grid["model"] == model_name]\
+                .dropna(subset=["auc_mean", "separation_auc"])\
+                .reset_index(drop=True)
         if sub.empty:
             continue
-        aucs     = sub["auc_mean"].to_numpy()
-        seps     = sub["separation_auc"].to_numpy()
-        auc_norm = (aucs - auc_min) / (auc_max - auc_min + 1e-9)
-        sep_norm = (seps - sep_min) / (sep_max - sep_min + 1e-9)
-        best     = sub.iloc[np.argmax(auc_norm - sep_norm)]
+        
+        # High auc_norm → accurate model / Low sep_norm → fair model / High score → both simultaneously
+        # As consequence the best coefficient is computed as max of the difference between auc_norm and sep_norm
+        scores   = np.array([trade_score(a, s) for a, s in
+                             zip(sub["auc_mean"], sub["separation_auc"])])
+        best_per_model[model_name] = sub.iloc[np.argmax(scores)]
+
+    return best_per_model, trade_score
+
+
+def print_best_points(df_grid, out_dir):
+    best_per_model, _ = _compute_best(df_grid)
+
+    print("\n=== BEST COEFFICIENT ===")
+    summary_rows = []
+    for model_name, best in best_per_model.items():
         summary_rows.append({
-            "model":            model_name,
-            "best_coef":        best["coef"],
-            "coef_name":        best["coef_name"],
-            "auc_mean":         round(best["auc_mean"],         4),
-            "separation_auc":   round(best["separation_auc"],   4),
+            "model":          model_name,
+            "best_coef":      best["coef"],
+            "coef_name":      best["coef_name"],
+            "auc_mean":       round(best["auc_mean"],       4),
+            "separation_auc": round(best["separation_auc"], 4),
         })
         print(f"  {model_name:<12}  {best['coef_name']}={best['coef']:.2f}"
               f"  AUC={best['auc_mean']:.4f}"
               f"  sep_auc={best['separation_auc']:.4f}")
 
-    df_best = pd.DataFrame(summary_rows)
-    out_path = out_dir / "grid_best_points.csv"
-    df_best.to_csv(out_path, index=False)
+    pd.DataFrame(summary_rows).to_csv(out_dir / "grid_best_points.csv", index=False)
 
 
-# Trade-off plot
-def plot_tradeoff(df_grid, out_dir, run_tag = "run"):
-    auc_min = df_grid["auc_mean"].min()
-    auc_max = df_grid["auc_mean"].max()
-    sep_min = df_grid["separation_auc"].min()
-    sep_max = df_grid["separation_auc"].max()
-
-    def trade_score(auc, sep):
-        auc_n = (auc - auc_min) / (auc_max - auc_min + 1e-9)
-        sep_n = (sep - sep_min) / (sep_max - sep_min + 1e-9)
-        return auc_n - sep_n
+def plot_tradeoff(df_grid, out_dir, run_tag="run"):
+    best_per_model, trade_score = _compute_best(df_grid)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    fig.suptitle(
-        "AUC and Separation AUC as a function of λ\n",
-        fontsize=13, fontweight="bold", y=1.02,
-    )
+    fig.suptitle("AUC and Separation AUC as a function of λ\n",
+                 fontsize=13, fontweight="bold", y=1.02)
 
     for ax, (model_name, style) in zip(axes, MODEL_STYLES.items()):
-        sub = (
-            df_grid[df_grid["model"] == model_name]
-            .dropna(subset=["auc_mean", "separation_auc"])
-            .sort_values("coef")
-            .reset_index(drop=True)
-        )
+        sub = df_grid[df_grid["model"] == model_name]\
+                .dropna(subset=["auc_mean", "separation_auc"])\
+                .sort_values("coef").reset_index(drop=True)
+
         if sub.empty:
             ax.set_title(f"{model_name} — no data")
             continue
@@ -264,8 +270,7 @@ def plot_tradeoff(df_grid, out_dir, run_tag = "run"):
         seps     = sub["separation_auc"].to_numpy()
         color    = style["color"]
         clabel   = style["coef_label"]
-        scores   = np.array([trade_score(a, s) for a, s in zip(aucs, seps)])
-        best_idx = np.argmax(scores)
+        best_idx = np.argmax([trade_score(a, s) for a, s in zip(aucs, seps)])
 
         ax2 = ax.twinx()
         ax.plot(coefs, aucs, color=color, linewidth=2.2,
@@ -273,19 +278,16 @@ def plot_tradeoff(df_grid, out_dir, run_tag = "run"):
         ax2.plot(coefs, seps, color=color, linewidth=2.2, linestyle="--",
                  marker=style["marker"], markersize=7, alpha=0.55, zorder=3)
 
-        for k, (c, a) in enumerate(zip(coefs, aucs)):
-            ax.annotate(
-                f"{clabel}={c:.1f}",
-                xy=(c, a), xytext=(0, 6), textcoords="offset points",
-                fontsize=7, color=color, ha="center", va="bottom",
-            )
+        for c, a in zip(coefs, aucs):
+            ax.annotate(f"{clabel}={c:.1f}", xy=(c, a),
+                        xytext=(0, 6), textcoords="offset points",
+                        fontsize=7, color=color, ha="center", va="bottom")
 
-        ax.scatter([coefs[best_idx]], [aucs[best_idx]],
-                   s=320, marker="*", color="gold",
-                   edgecolors=color, linewidths=1.5, zorder=6)
-        ax2.scatter([coefs[best_idx]], [seps[best_idx]],
-                    s=320, marker="*", color="gold",
-                    edgecolors=color, linewidths=1.5, zorder=6)
+        for vals, ax_ in [(aucs, ax), (seps, ax2)]:
+            ax_.scatter([coefs[best_idx]], [vals[best_idx]],
+                        s=320, marker="*", color="gold",
+                        edgecolors=color, linewidths=1.5, zorder=6)
+
         ax.annotate(
             f"best: {clabel}={coefs[best_idx]:.1f}\n"
             f"AUC={aucs[best_idx]:.3f}\n"
@@ -298,31 +300,27 @@ def plot_tradeoff(df_grid, out_dir, run_tag = "run"):
         )
 
         ax.set_xlabel(f"λ  ({clabel})", fontsize=11)
-        ax.set_ylabel("AUC  (↑ higher is better)", fontsize=10, color=color)
+        ax.set_ylabel("AUC  (↑ higher)", fontsize=10, color=color)
         ax2.set_ylabel("Separation AUC  (↓ fairer)", fontsize=10, color=color)
         ax.tick_params(axis="y", labelcolor=color)
         ax2.tick_params(axis="y", labelcolor=color)
-        ax.set_title(model_name, fontsize=12, fontweight="bold",
-                     color=color, pad=10)
+        ax.set_title(model_name, fontsize=12, fontweight="bold", color=color)
         ax.grid(alpha=0.2, linestyle="--")
 
-        legend_elems = [
+        ax.legend(handles=[
             Line2D([0], [0], color=color, linewidth=2,
-                   marker=style["marker"], markersize=7,
-                   label="AUC (solid)"),
+                   marker=style["marker"], label="AUC (solid)"),
             Line2D([0], [0], color=color, linewidth=2, linestyle="--",
-                   marker=style["marker"], markersize=7, alpha=0.55,
-                   label="Separation AUC (dashed)"),
+                   marker=style["marker"], alpha=0.55, label="Separation AUC (dashed)"),
             Line2D([0], [0], marker="*", color="gold", markersize=11,
-                   markeredgecolor=color, linewidth=0,
-                   label="Best trade-off (★)"),
-        ]
-        ax.legend(handles=legend_elems, fontsize=8,
-                  loc="lower left", framealpha=0.9)
+                   markeredgecolor=color, linewidth=0, label="Best trade-off (★)"),
+        ], fontsize=8, loc="lower left", framealpha=0.9)
 
     plt.tight_layout()
     plot_path = out_dir / f"tradeoff_{run_tag}.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    return plot_path
     plt.show()
 
     return plot_path
