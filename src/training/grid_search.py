@@ -1,26 +1,8 @@
 """
-src/training/grid_search.py
-
-Grid search on the AUC vs Separation trade-off for the three MLP models.
+Grid search on the AUC vs Separation trade-off for the two MLP models.
 Separation is measured as AUC of the fairness curve over time,
 consistent with the main run.
 
-Usage (from experiments/run_simulation.py after building datasets):
-
-    from src.training.grid_search import run_grid_search, plot_tradeoff
-
-    df_grid = run_grid_search(
-        X_static=X_static, y_static=y_static, grp_static=grp_static,
-        sens_static=sens_static,
-        X_dynamic=X_dynamic, y_dynamic=y_dynamic, grp_dynamic=grp_dynamic,
-        sens_dynamic=sens_dynamic, lmk_vals=lmk_vals,
-        X_pp=X_pp, y_pp=y_pp, grp_pp=grp_pp,
-        sens_pp=sens_pp, pp_ages=pp_ages,
-        group_names=GROUP_NAMES,
-        eo_mode_d=EO_MODE_D, eo_mode_p=EO_MODE_P,
-        out_dir=OUT_DIR, run_tag=run_tag,
-    )
-    plot_tradeoff(df_grid, out_dir=OUT_DIR, run_tag=run_tag)
 """
 
 import numpy as np
@@ -41,33 +23,25 @@ from src.training.cross_validation import find_best_threshold
 
 warnings.filterwarnings("ignore")
 
-# ── Default sweep values ──────────────────────────────────────────────────────
 
 DEFAULT_BETAS  = [0.0, 0.3, 0.5, 0.7, 1.0]
 DEFAULT_ALPHAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
-DEFAULT_GAMMAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
 
 MODEL_STYLES = {
     "M_STATIC":  {"color": "#3A6BC4", "marker": "o", "coef_label": "β"},
     "M_DYNAMIC": {"color": "#D4612A", "marker": "s", "coef_label": "α"},
-    "M_PP":      {"color": "#2E8B57", "marker": "^", "coef_label": "γ"},
 }
 
 
-# ── Single CV run ─────────────────────────────────────────────────────────────
 
 def _run_cv(
-    model_tag: str,
+    model_tag,
     X, y, grp, sens, time_arr,
-    beta: float, alpha: float, gamma: float,
-    group_names: dict,
-    n_folds: int = 5,
-    eo_mode_d: str = "mean",
-    eo_mode_p: str = "mean",
-    schedule_mode_d: str = "flat",
-    schedule_mode_p: str = "flat",
-) -> dict:
-    """Run GroupKFold CV for one model / one coefficient value."""
+    beta, alpha,
+    group_names,
+    n_folds=5,
+    eo_mode_d="mean",
+    schedule_mode_d="flat"):
 
     np.random.seed(42)
     torch.manual_seed(42)
@@ -85,18 +59,16 @@ def _run_cv(
             time_tr         = time_tr,
             subj_ids_tr     = grp[tr_idx],
             model_name      = model_tag,
-            beta=beta, alpha=alpha, gamma=gamma,
+            beta=beta, alpha=alpha,
             eo_mode_d       = eo_mode_d,
-            eo_mode_p       = eo_mode_p,
             schedule_mode_d = schedule_mode_d,
-            schedule_mode_p = schedule_mode_p,
             verbose         = False,
         )
         oof_preds[te_idx] = p_te
 
     th = find_best_threshold(y.astype(int), oof_preds)
 
-    # ── Mean OOF AUC ─────────────────────────────────────────────────────────
+    # Mean OOF AUC
     fold_aucs = []
     for _, te_idx in gkf.split(X, y, grp):
         if len(np.unique(y[te_idx])) > 1:
@@ -104,7 +76,7 @@ def _run_cv(
                 roc_auc_score(y[te_idx].astype(int), oof_preds[te_idx])
             )
 
-    # ── Fairness AUC ─────────────────────────────────────────────────────────
+    # Fairness AUC 
     if time_arr is not None:
         time_rows = []
         for t in sorted(np.unique(time_arr)):
@@ -123,8 +95,6 @@ def _run_cv(
             time_rows.append({
                 "t":            t,
                 "separation":   axioms.get("separation",   np.nan),
-                "independence": axioms.get("independence", np.nan),
-                "sufficiency":  axioms.get("sufficiency",  np.nan),
             })
 
         df_t = pd.DataFrame(time_rows)
@@ -139,8 +109,6 @@ def _run_cv(
             return float(np.trapezoid(v, t_n))
 
         sep_auc  = trapz_norm("separation")
-        ind_auc  = trapz_norm("independence")
-        suf_auc  = trapz_norm("sufficiency")
         sep_mean = df_t["separation"].mean() if not df_t.empty else np.nan
 
     else:
@@ -152,52 +120,35 @@ def _run_cv(
                                   group_names, threshold=th)
         axioms = res.get("axioms", {})
         sep_auc  = axioms.get("separation",   np.nan)
-        ind_auc  = axioms.get("independence", np.nan)
-        suf_auc  = axioms.get("sufficiency",  np.nan)
         sep_mean = sep_auc
 
     return {
         "auc_mean":         float(np.nanmean(fold_aucs)) if fold_aucs else np.nan,
         "separation_auc":   sep_auc,
         "separation_mean":  sep_mean,
-        "independence_auc": ind_auc,
-        "sufficiency_auc":  suf_auc,
         "threshold":        float(th),
     }
 
 
-# ── Main grid search ──────────────────────────────────────────────────────────
-
+# Main grid search run
 def run_grid_search(
     X_static, y_static, grp_static, sens_static,
     X_dynamic, y_dynamic, grp_dynamic, sens_dynamic, lmk_vals,
-    X_pp, y_pp, grp_pp, sens_pp, pp_ages,
-    group_names: dict,
-    betas:  list = None,
-    alphas: list = None,
-    gammas: list = None,
-    n_folds: int = 5,
-    eo_mode_d: str = "mean",
-    eo_mode_p: str = "mean",
-    schedule_mode_d: str = "flat",
-    schedule_mode_p: str = "flat",
-    out_dir: Path = Path("outputs"),
-    run_tag: str = "run",
-) -> pd.DataFrame:
-    """
-    Run grid search over fairness penalty coefficients for all three models.
+    group_names,
+    betas=None,
+    alphas=None,
+    n_folds=5,
+    eo_mode_d="mean",
+    schedule_mode_d="flat",
+    out_dir=Path("outputs"),
+    run_tag="run"):
 
-    Returns
-    -------
-    pd.DataFrame with one row per (model, coefficient value)
-    """
     if betas  is None: betas  = DEFAULT_BETAS
     if alphas is None: alphas = DEFAULT_ALPHAS
-    if gammas is None: gammas = DEFAULT_GAMMAS
 
     records = []
 
-    # ── M_STATIC ──────────────────────────────────────────────────────────────
+    # M_STATIC
     print("=" * 60)
     print("GRID SEARCH — M_STATIC")
     print("=" * 60)
@@ -205,15 +156,15 @@ def run_grid_search(
         print(f"  beta={beta:.2f} ...", end=" ", flush=True)
         r = _run_cv(
             "static", X_static, y_static, grp_static, sens_static, None,
-            beta=beta, alpha=0.0, gamma=0.0,
+            beta=beta, alpha=0.0,
             group_names=group_names, n_folds=n_folds,
-            eo_mode_d=eo_mode_d, eo_mode_p=eo_mode_p,
+            eo_mode_d=eo_mode_d
         )
         records.append({"model": "M_STATIC", "coef": beta,
                          "coef_name": "beta", **r})
         print(f"AUC={r['auc_mean']:.4f}  sep_auc={r['separation_auc']:.4f}")
 
-    # ── M_DYNAMIC ─────────────────────────────────────────────────────────────
+    # M_DYNAMIC 
     print("\n" + "=" * 60)
     print("GRID SEARCH — M_DYNAMIC")
     print("=" * 60)
@@ -221,46 +172,28 @@ def run_grid_search(
         print(f"  alpha={alpha:.2f} ...", end=" ", flush=True)
         r = _run_cv(
             "dynamic", X_dynamic, y_dynamic, grp_dynamic, sens_dynamic,
-            lmk_vals, beta=0.0, alpha=alpha, gamma=0.0,
+            lmk_vals, beta=0.0, alpha=alpha, 
             group_names=group_names, n_folds=n_folds,
-            eo_mode_d=eo_mode_d, eo_mode_p=eo_mode_p,
+            eo_mode_d=eo_mode_d, 
             schedule_mode_d=schedule_mode_d,
         )
         records.append({"model": "M_DYNAMIC", "coef": alpha,
                          "coef_name": "alpha", **r})
         print(f"AUC={r['auc_mean']:.4f}  sep_auc={r['separation_auc']:.4f}")
 
-    # ── M_PP ──────────────────────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("GRID SEARCH — M_PP")
-    print("=" * 60)
-    for gamma in gammas:
-        print(f"  gamma={gamma:.2f} ...", end=" ", flush=True)
-        r = _run_cv(
-            "person_period", X_pp, y_pp, grp_pp, sens_pp, pp_ages,
-            beta=0.0, alpha=0.0, gamma=gamma,
-            group_names=group_names, n_folds=n_folds,
-            eo_mode_d=eo_mode_d, eo_mode_p=eo_mode_p,
-            schedule_mode_p=schedule_mode_p,
-        )
-        records.append({"model": "M_PP", "coef": gamma,
-                         "coef_name": "gamma", **r})
-        print(f"AUC={r['auc_mean']:.4f}  sep_auc={r['separation_auc']:.4f}")
 
     df_grid = pd.DataFrame(records)
     csv_path = out_dir / f"grid_tradeoff_{run_tag}.csv"
     df_grid.to_csv(csv_path, index=False)
-    print(f"\n✓ Saved: {csv_path}")
     print(df_grid.to_string(index=False))
 
-    # Best points summary
+
     _print_best_points(df_grid, out_dir)
 
     return df_grid
 
 
-def _print_best_points(df_grid: pd.DataFrame, out_dir: Path) -> None:
-    """Print and save best trade-off points per model."""
+def _print_best_points(df_grid, out_dir):
     auc_min = df_grid["auc_mean"].min()
     auc_max = df_grid["auc_mean"].max()
     sep_min = df_grid["separation_auc"].min()
@@ -268,7 +201,7 @@ def _print_best_points(df_grid: pd.DataFrame, out_dir: Path) -> None:
 
     print("\n=== BEST POINTS (max AUC − normalised Separation AUC) ===")
     summary_rows = []
-    for model_name in ["M_STATIC", "M_DYNAMIC", "M_PP"]:
+    for model_name in ["M_STATIC", "M_DYNAMIC"]:
         sub = (
             df_grid[df_grid["model"] == model_name]
             .dropna(subset=["auc_mean", "separation_auc"])
@@ -287,8 +220,6 @@ def _print_best_points(df_grid: pd.DataFrame, out_dir: Path) -> None:
             "coef_name":        best["coef_name"],
             "auc_mean":         round(best["auc_mean"],         4),
             "separation_auc":   round(best["separation_auc"],   4),
-            "independence_auc": round(best["independence_auc"], 4),
-            "sufficiency_auc":  round(best["sufficiency_auc"],  4),
         })
         print(f"  {model_name:<12}  {best['coef_name']}={best['coef']:.2f}"
               f"  AUC={best['auc_mean']:.4f}"
@@ -297,17 +228,10 @@ def _print_best_points(df_grid: pd.DataFrame, out_dir: Path) -> None:
     df_best = pd.DataFrame(summary_rows)
     out_path = out_dir / "grid_best_points.csv"
     df_best.to_csv(out_path, index=False)
-    print(f"\n✓ Saved: {out_path}")
 
 
-# ── Trade-off plot ────────────────────────────────────────────────────────────
-
-def plot_tradeoff(df_grid: pd.DataFrame, out_dir: Path,
-                  run_tag: str = "run") -> Path:
-    """
-    One panel per model: AUC (solid) and Separation AUC (dashed) vs λ.
-    Stars mark the best trade-off point.
-    """
+# Trade-off plot
+def plot_tradeoff(df_grid, out_dir, run_tag = "run"):
     auc_min = df_grid["auc_mean"].min()
     auc_max = df_grid["auc_mean"].max()
     sep_min = df_grid["separation_auc"].min()
@@ -318,10 +242,9 @@ def plot_tradeoff(df_grid: pd.DataFrame, out_dir: Path,
         sep_n = (sep - sep_min) / (sep_max - sep_min + 1e-9)
         return auc_n - sep_n
 
-    fig, axes = plt.subplots(1, 3, figsize=(17, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     fig.suptitle(
-        "AUC and Separation AUC as a function of λ — one panel per model\n"
-        "★ marks the best trade-off point (max AUC − min Separation AUC, normalised)",
+        "AUC and Separation AUC as a function of λ\n",
         fontsize=13, fontweight="bold", y=1.02,
     )
 
@@ -401,5 +324,5 @@ def plot_tradeoff(df_grid: pd.DataFrame, out_dir: Path,
     plot_path = out_dir / f"tradeoff_{run_tag}.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.show()
-    print(f"✓ Saved: {plot_path}")
+
     return plot_path

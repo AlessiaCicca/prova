@@ -141,9 +141,9 @@ def plot_separation_over_time(
 def plot_auc_fairness_bar(
     df_auc, out_dir, attr_name: str = "", filename: str = "fairness_auc_comparison.png"):
 
-    models = ["AUC_M_STATIC", "AUC_M_DYNAMIC", "AUC_M_PP"]
-    labels = ["M_STATIC",     "M_DYNAMIC",      "M_PP"]
-    colors = ["#4C72B0",      "#DD8452",         "#55A868"]
+    models = ["AUC_M_STATIC", "AUC_M_DYNAMIC"]
+    labels = ["M_STATIC",     "M_DYNAMIC"]
+    colors = ["#4C72B0",      "#DD8452"]
 
     # one group per attr (real) or single bar (simulation)
     attrs  = df_auc["attr"].unique() if "attr" in df_auc.columns else [""]

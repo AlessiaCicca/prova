@@ -17,17 +17,14 @@ SEED = 42
 # ── Fairness penalty coefficients ────────────────────────────────────────────
 BETA  = 0.0    # M_STATIC  EO penalty weight
 ALPHA = 0.0    # M_DYNAMIC EO penalty weight
-GAMMA = 0.0    # M_PP      EO penalty weight
 
 # ── EO penalty mode ───────────────────────────────────────────────────────────
 # Options: "mean" | "weighted" | "trend_aware" | "weighted+trend"
 EO_MODE_D = "trend_aware"   # dynamic model
-EO_MODE_P = "trend_aware"   # person-period model
 
 # ── Time schedule mode (alpha_schedule) ──────────────────────────────────────
 # Options: "flat" | "decay" | "growth" | "u_shaped" | "early_focus"
 SCHEDULE_MODE_D = "decay"
-SCHEDULE_MODE_P = "decay"
 
 # ── MLP architecture ──────────────────────────────────────────────────────────
 HIDDEN1  = 64
@@ -88,7 +85,6 @@ GROUP_NAMES_FNMA = {
 # ── Grid search sweep values ──────────────────────────────────────────────────
 GRID_BETAS  = [0.0, 0.3, 0.5, 0.7, 1.0]
 GRID_ALPHAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
-GRID_GAMMAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
 
 # ── W&B ───────────────────────────────────────────────────────────────────────
 USE_WANDB    = False

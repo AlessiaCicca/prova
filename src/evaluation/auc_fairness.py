@@ -36,9 +36,8 @@ def _safe_trapz(sub, time_col, metric, min_samples):
 
 # Simulation: single sensitive attribute 
 def auc_fairness_single_attr(
-    df_dynamic, df_pp, df_static_agg,
+    df_dynamic, df_static_agg,
     time_col_dyn="landmark",
-    time_col_pp="time",
     min_samples_per_group=20,
 ):
     metric     = "separation"
@@ -55,15 +54,13 @@ def auc_fairness_single_attr(
         "metric":        metric,
         "AUC_M_STATIC":  static_val,
         "AUC_M_DYNAMIC": _safe_trapz(df_dynamic, time_col_dyn, metric, min_samples_per_group),
-        "AUC_M_PP":      _safe_trapz(df_pp,      time_col_pp,  metric, min_samples_per_group),
     }])
 
 
 # Real dataset: multiple sensitive attributes 
 def auc_fairness_all_models(
-    df_dynamic, df_pp, df_static_agg,
+    df_dynamic, df_static_agg,
     time_col_dyn="landmark",
-    time_col_pp="age_lo",
     attrs=None,
     min_samples_per_group=50,
 ):
@@ -88,8 +85,6 @@ def auc_fairness_all_models(
             "AUC_M_STATIC":  static_val,
             "AUC_M_DYNAMIC": _safe_trapz(df_dynamic[df_dynamic["attr"] == attr_name],
                                           time_col_dyn, metric, min_samples_per_group),
-            "AUC_M_PP":      _safe_trapz(df_pp[df_pp["attr"] == attr_name],
-                                          time_col_pp, metric, min_samples_per_group),
         })
 
     return pd.DataFrame(results)

@@ -1,23 +1,8 @@
 """
-experiments/run_fnma.py
+MAIN RUN for real data analysis
 
-Entry point for FNMA real-dataset experiments.
-Reads panel_all_years_sampled.csv produced by data_generation/fnma/preprocessing.py,
-builds the three datasets, runs CV, fairness analysis (SEX/RACE/AGE), and optionally
-grid search.
-
-Usage:
-    python experiments/run_fnma.py \
-        --data_path /content/drive/MyDrive/thesis_data/output/panel_all_years_sampled.csv \
-        --fair_attr SEX \
-        --config experiments/configs/fnma.yaml
-
-    # Run all three sensitive attributes:
-    for attr in SEX RACE AGE; do
-        python experiments/run_fnma.py \\
-            --data_path /path/to/panel_all_years_sampled.csv \\
-            --fair_attr $attr
-    done
+Reads data matched by data_generation/realData/,
+builds the two datasets, runs CV, fairness analysis, and grid search.
 """
 
 import argparse
@@ -39,45 +24,43 @@ sys.path.insert(0, str(ROOT))
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ── src imports ───────────────────────────────────────────────────────────────
+# IMPORTS
 from config import (
     SEED, DEVICE,
-    ALPHA, BETA, GAMMA,
-    EO_MODE_D, EO_MODE_P,
-    SCHEDULE_MODE_D, SCHEDULE_MODE_P,
+    ALPHA, BETA, 
+    EO_MODE_D,
+    SCHEDULE_MODE_D, 
     HORIZON_MONTHS, LANDMARKS_FNMA,
     STATIC_COLS_FNMA, TVC_COLS_FNMA, CAT_COLS_FNMA,
     FAIR_ATTR, GROUP_NAMES_FNMA,
     N_FOLDS, USE_WANDB, WANDB_ENTITY, WANDB_PROJECT,
-    GRID_BETAS, GRID_ALPHAS, GRID_GAMMAS,
+    GRID_BETAS, GRID_ALPHAS,
 )
 from src.data.build_static        import build_static
 from src.data.build_dynamic       import build_dynamic
-from src.data.build_person_period import build_person_period
-from src.training.cross_validation import run_cv, build_summary_table, build_landmark_summary
+from src.training.cross_validation import run_cv, build_summary_table, find_best_threshold
 from src.training.grid_search      import run_grid_search, plot_tradeoff
 from src.evaluation.fairness_metrics import (
     fairness_metrics, filter_sensitive, res_to_row,
-    print_fairness_report, compute_threshold, compute_adTPR_adFPR,
+    print_fairness_report, compute_adTPR_adFPR,
 )
 from src.evaluation.auc_fairness  import auc_fairness_all_models
 from src.evaluation.fairness_plots import (
-    plot_fairness_over_time, plot_auc_fairness_bar,
+    plot_separation_over_time, plot_auc_fairness_bar,
 )
 
 
-# ── Reproducibility ───────────────────────────────────────────────────────────
+# Reproducibility
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Run FNMA real-data experiment."
+        description="Run real-data experiment."
     )
     p.add_argument("--data_path", required=True,
                    help="Path to panel_all_years_sampled.csv")
@@ -92,14 +75,14 @@ def parse_args():
     return p.parse_args()
 
 
-def load_config(config_path: str) -> dict:
+def load_config(config_path):
     cfg = dict(
-        alpha=ALPHA, beta=BETA, gamma=GAMMA,
-        eo_mode_d=EO_MODE_D, eo_mode_p=EO_MODE_P,
-        schedule_mode_d=SCHEDULE_MODE_D, schedule_mode_p=SCHEDULE_MODE_P,
+        alpha=ALPHA, beta=BETA, 
+        eo_mode_d=EO_MODE_D, 
+        schedule_mode_d=SCHEDULE_MODE_D, 
         horizon=HORIZON_MONTHS, landmarks=LANDMARKS_FNMA,
         n_folds=N_FOLDS, use_wandb=USE_WANDB,
-        grid_betas=GRID_BETAS, grid_alphas=GRID_ALPHAS, grid_gammas=GRID_GAMMAS,
+        grid_betas=GRID_BETAS, grid_alphas=GRID_ALPHAS,
     )
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:
@@ -108,9 +91,8 @@ def load_config(config_path: str) -> dict:
     return cfg
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _is_default(s: pd.Series) -> np.ndarray:
+def _is_default(s):
     num = pd.to_numeric(s, errors="coerce")
     return (num.notna() & (num != 0)).astype(np.int8).values
 
@@ -139,10 +121,8 @@ def _scheduled_balance(orig_upb, r, N, a):
         return np.nan
 
 
-# ── Data loading ──────────────────────────────────────────────────────────────
-
-def load_raw(data_path: str, fair_attr: str) -> pd.DataFrame:
-    """Load panel, compute features, demographics, and FirstDefaultAge."""
+# Data loading: load panel, compute features, demographics, and FirstDefaultAge
+def load_raw(data_path, fair_attr):
     print(f"Loading: {data_path}")
     df = pd.read_csv(data_path, usecols=[
         "loan_sequence_number", "loan_age", "loan_term",
@@ -237,25 +217,20 @@ def load_raw(data_path: str, fair_attr: str) -> pd.DataFrame:
     return df
 
 
-# ── Fairness analysis ─────────────────────────────────────────────────────────
-
+#  Fairness analysis 
 def run_fairness_analysis(
     y_static, static_oof, sens_by_attr_static,
     y_dynamic, dynamic_oof, sens_by_attr_dynamic, lmk_vals,
-    y_pp, pp_oof, sens_by_attr_pp, pp_ages,
-    out_dir: Path, cfg: dict,
-) -> None:
-    """Compute fairness for SEX, RACE, AGE and save all outputs."""
+    out_dir, cfg):
 
     attrs = ["SEX", "RACE", "AGE"]
 
-    th_static  = compute_threshold(y_static,  static_oof)
-    th_dynamic = compute_threshold(y_dynamic, dynamic_oof)
-    th_pp      = compute_threshold(y_pp,      pp_oof)
+    th_static  = find_best_threshold(y_static,  static_oof)
+    th_dynamic = find_best_threshold(y_dynamic, dynamic_oof)
+    
 
     ybin_static  = (static_oof  >= th_static ).astype(int)
     ybin_dynamic = (dynamic_oof >= th_dynamic).astype(int)
-    ybin_pp      = (pp_oof      >= th_pp     ).astype(int)
 
     agg_rows = []
     dyn_rows = []
@@ -265,7 +240,6 @@ def run_fairness_analysis(
         group_names = GROUP_NAMES_FNMA[attr_name]
         s_stat = sens_by_attr_static[attr_name]
         s_dyn  = sens_by_attr_dynamic[attr_name]
-        s_pp   = sens_by_attr_pp[attr_name]
 
         print(f"\n{'='*50}\n  {attr_name}\n{'='*50}")
 
@@ -273,7 +247,6 @@ def run_fairness_analysis(
         for mname, y_t, y_p, y_b, sens, th in [
             ("M_STATIC",  y_static,  static_oof,  ybin_static,  s_stat, th_static),
             ("M_DYNAMIC", y_dynamic, dynamic_oof, ybin_dynamic, s_dyn,  th_dynamic),
-            ("M_PP",      y_pp,      pp_oof,      ybin_pp,      s_pp,   th_pp),
         ]:
             yt_f, yp_f, sn_f = filter_sensitive(y_t, y_p, sens)
             yb_f = (yp_f >= th).astype(int)
@@ -299,32 +272,11 @@ def run_fairness_analysis(
                                         "model": "M_DYNAMIC",
                                         "landmark": L}))
 
-        # PP per age bin (3-month bins)
-        max_age  = int(np.nanmax(pp_ages))
-        age_bins = [(m, m + 3) for m in range(0, max_age, 3)]
-        for (age_lo, age_hi) in age_bins:
-            mask = (pp_ages >= age_lo) & (pp_ages < age_hi)
-            if mask.sum() < 100: continue
-            yt_f, yp_f, sn_f = filter_sensitive(
-                y_pp[mask], pp_oof[mask], s_pp[mask]
-            )
-            if len(np.unique(yt_f)) < 2 or len(np.unique(sn_f)) < 2: continue
-            yb_f = (yp_f >= th_pp).astype(int)
-            res  = fairness_metrics(yt_f, yp_f, yb_f, sn_f,
-                                    group_names, threshold=th_pp)
-            pp_rows.append(res_to_row(res, group_names,
-                                      {"attr": attr_name,
-                                       "model": "M_PP",
-                                       "age_lo": age_lo,
-                                       "age_hi": age_hi,
-                                       "age_bin": f"{age_lo}-{age_hi}m"}))
-
         # adTPR / adFPR
         print(f"\n  adTPR / adFPR — {attr_name}")
         for mname, y_t, y_b, sens, tpts in [
             ("M_STATIC",  y_static,  ybin_static,  s_stat, None),
             ("M_DYNAMIC", y_dynamic, ybin_dynamic, s_dyn,  lmk_vals),
-            ("M_PP",      y_pp,      ybin_pp,      s_pp,   pp_ages),
         ]:
             res = compute_adTPR_adFPR(y_t, y_b, sens, tpts)
             print(f"    {mname:<12} adTPR={res['adTPR']:.4f}  adFPR={res['adFPR']:.4f}")
@@ -339,27 +291,23 @@ def run_fairness_analysis(
 
     # AUC fairness
     df_auc = auc_fairness_all_models(
-        df_dynamic=df_dyn_lmk, df_pp=df_pp_age, df_static_agg=df_agg,
-        time_col_dyn="landmark", time_col_pp="age_lo",
+        df_dynamic=df_dyn_lmk, df_static_agg=df_agg,
+        time_col_dyn="landmark",
         min_samples_per_group=100,
     )
     df_auc.to_csv(out_dir / "auc_fairness_comparison.csv", index=False)
     print("\n=== AUC FAIRNESS ===")
     print(df_auc.to_string(index=False))
 
+
     # Plots
-    plot_fairness_over_time(
+    plot_separation_over_time(
         df=df_dyn_lmk, time_col="landmark",
         title="Fairness — M_DYNAMIC by landmark",
         filename="fairness_dynamic_by_landmark.png",
         out_dir=out_dir, static_df=df_agg, min_samples_per_group=100,
     )
-    plot_fairness_over_time(
-        df=df_pp_age, time_col="age_lo",
-        title="Fairness — M_PP by loan age",
-        filename="fairness_pp_by_age.png",
-        out_dir=out_dir, static_df=df_agg, min_samples_per_group=100,
-    )
+
     for attr_name in attrs:
         sub = df_auc[df_auc["attr"] == attr_name].drop(columns="attr")
         plot_auc_fairness_bar(
@@ -367,10 +315,9 @@ def run_fairness_analysis(
             filename=f"fairness_auc_{attr_name}.png",
         )
 
-    print(f"\n✓ Fairness outputs saved in: {out_dir}")
+    print(f"\nFairness outputs saved in: {out_dir}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
@@ -384,18 +331,14 @@ def main():
         f"fnma_{args.fair_attr}"
         f"_S:{cfg['beta']}"
         f"_D:{cfg['alpha']}_{cfg['eo_mode_d']}"
-        f"_P:{cfg['gamma']}_{cfg['eo_mode_p']}"
     )
 
     print(f"\n{'='*60}")
     print(f"  Dataset   :  REAL")
     print(f"  Attr      : {args.fair_attr}")
-    print(f"  Data      : {args.data_path}")
-    print(f"  Out dir   : {out_dir}")
-    print(f"  Device    : {DEVICE}")
     print(f"{'='*60}\n")
 
-    # ── Load raw ──────────────────────────────────────────────────────────────
+    # Load raw 
     df = load_raw(args.data_path, args.fair_attr)
 
     trend_cols = ["bd_pct_trend", "estimated_ltv_trend", "current_upb_trend"]
@@ -411,18 +354,7 @@ def main():
         "AGE":  "age_bin_loan",
     }
 
-    # ── Build datasets ────────────────────────────────────────────────────────
-    print("\nBuilding PERSON-PERIOD dataset...")
-    pp_data = build_person_period(
-        df=df,
-        static_cols=STATIC_COLS_FNMA, tvc_cols=TVC_COLS_FNMA,
-        trend_cols=trend_cols, cat_cols=CAT_COLS_FNMA,
-        id_col="loan_sequence_number", time_col="loan_age",
-        event_col=None,   # FNMA has no Event column — uses FirstDefaultAge
-        first_event_col="FirstDefaultAge",
-        sens_col="sens_loan", enc_cat=enc_cat,
-    )
-
+    # Build datasets
     print("\nBuilding STATIC dataset...")
     static_data = build_static(
         df=df,
@@ -445,30 +377,26 @@ def main():
     )
 
     # Collect sensitive arrays for all attributes
-    pp_sens_by_attr     = {}
     static_sens_by_attr = {}
     dyn_sens_by_attr    = {}
 
     for attr_name, col in sens_col_map.items():
         # reindex from original df
-        pp_ids  = pd.Series(pp_data["groups"])
         st_ids  = pd.Series(static_data["groups"])
         dy_ids  = pd.Series(dynamic_data["groups"])
 
         per_loan = df.groupby("loan_sequence_number")[col].first()
 
-        pp_sens_by_attr[attr_name]     = pp_ids.map(per_loan).to_numpy()
         static_sens_by_attr[attr_name] = st_ids.map(per_loan).to_numpy()
         dyn_sens_by_attr[attr_name]    = dy_ids.map(per_loan).to_numpy()
 
     del df; gc.collect()
 
-    # ── CV ────────────────────────────────────────────────────────────────────
+    #  CV 
     train_kwargs = dict(
-        beta=cfg["beta"], alpha=cfg["alpha"], gamma=cfg["gamma"],
-        eo_mode_d=cfg["eo_mode_d"], eo_mode_p=cfg["eo_mode_p"],
+        beta=cfg["beta"], alpha=cfg["alpha"],
+        eo_mode_d=cfg["eo_mode_d"], 
         schedule_mode_d=cfg["schedule_mode_d"],
-        schedule_mode_p=cfg["schedule_mode_p"],
     )
 
     print("\nTraining M_STATIC...")
@@ -487,31 +415,18 @@ def main():
         landmarks=cfg["landmarks"], **train_kwargs,
     )
 
-    print("\nTraining M_PP...")
-    res_pp = run_cv(
-        X=pp_data["X"], y=pp_data["y"],
-        groups=pp_data["groups"], sensitive=pp_data["sensitive"],
-        time_arr=pp_data["ages"], subj_ids=pp_data["groups"],
-        model_name="person_period", n_splits=cfg["n_folds"], **train_kwargs,
-    )
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+ 
     summary = build_summary_table({
         "M_STATIC":  res_static,
         "M_DYNAMIC": res_dynamic,
-        "M_PP":      res_pp,
     })
     print("\n=== CV RESULTS ===")
     print(summary.to_string(index=False))
     summary.to_csv(out_dir / "cv_results.csv", index=False)
 
-    lmk_summary = build_landmark_summary(res_dynamic, cfg["landmarks"])
-    if not lmk_summary.empty:
-        print("\n=== DYNAMIC — AUC PER LANDMARK ===")
-        print(lmk_summary.to_string(index=False))
-        lmk_summary.to_csv(out_dir / "dynamic_by_landmark_cv.csv", index=False)
 
-    # ── Fairness analysis ─────────────────────────────────────────────────────
+    # Fairness analysis
     print("\n" + "="*60)
     print("FAIRNESS ANALYSIS")
     print("="*60)
@@ -524,14 +439,10 @@ def main():
         dynamic_oof=res_dynamic["oof_preds"],
         sens_by_attr_dynamic=dyn_sens_by_attr,
         lmk_vals=dynamic_data["lmk_vals"],
-        y_pp=pp_data["y"],
-        pp_oof=res_pp["oof_preds"],
-        sens_by_attr_pp=pp_sens_by_attr,
-        pp_ages=pp_data["ages"],
         out_dir=out_dir, cfg=cfg,
     )
 
-    # ── Grid search ───────────────────────────────────────────────────────────
+    # Grid search
     if args.grid_search:
         print("\n" + "="*60)
         print("GRID SEARCH")
@@ -545,19 +456,15 @@ def main():
             grp_dynamic=dynamic_data["groups"],
             sens_dynamic=dynamic_data["sensitive"],
             lmk_vals=dynamic_data["lmk_vals"],
-            X_pp=pp_data["X"], y_pp=pp_data["y"],
-            grp_pp=pp_data["groups"], sens_pp=pp_data["sensitive"],
-            pp_ages=pp_data["ages"],
             group_names=GROUP_NAMES_FNMA[args.fair_attr],
             betas=cfg["grid_betas"], alphas=cfg["grid_alphas"],
-            gammas=cfg["grid_gammas"],
             n_folds=cfg["n_folds"],
-            eo_mode_d=cfg["eo_mode_d"], eo_mode_p=cfg["eo_mode_p"],
+            eo_mode_d=cfg["eo_mode_d"],
             out_dir=out_dir, run_tag=run_tag,
         )
         plot_tradeoff(df_grid, out_dir=out_dir, run_tag=run_tag)
 
-    print(f"\n✓ All outputs saved in: {out_dir}")
+    print(f"\nAll outputs saved in: {out_dir}")
 
 
 if __name__ == "__main__":
