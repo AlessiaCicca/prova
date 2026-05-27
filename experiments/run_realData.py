@@ -30,9 +30,9 @@ from config import (
     ALPHA, BETA, 
     EO_MODE_D,
     SCHEDULE_MODE_D, 
-    HORIZON_MONTHS, LANDMARKS_FNMA,
-    STATIC_COLS_FNMA, TVC_COLS_FNMA, CAT_COLS_FNMA,
-    FAIR_ATTR, GROUP_NAMES_FNMA,
+    HORIZON_MONTHS, LANDMARKS,
+    STATIC_COLS, TVC_COLS, CAT_COLS,
+    FAIR_ATTR, GROUP_NAMES,
     N_FOLDS, USE_WANDB, WANDB_ENTITY, WANDB_PROJECT,
     GRID_BETAS, GRID_ALPHAS,
 )
@@ -67,11 +67,11 @@ def parse_args():
     p.add_argument("--fair_attr", default="SEX",
                    choices=["SEX", "RACE", "AGE"])
     p.add_argument("--config", default=None,
-                   help="Path to YAML config (overrides config.py defaults)")
+                   help="Path to YAML config")
     p.add_argument("--grid_search", action="store_true",
                    help="Run grid search after CV")
     p.add_argument("--out_dir", default=None,
-                   help="Output directory (default: outputs/fnma/{fair_attr})")
+                   help="Output directory")
     return p.parse_args()
 
 
@@ -80,7 +80,7 @@ def load_config(config_path):
         alpha=ALPHA, beta=BETA, 
         eo_mode_d=EO_MODE_D, 
         schedule_mode_d=SCHEDULE_MODE_D, 
-        horizon=HORIZON_MONTHS, landmarks=LANDMARKS_FNMA,
+        horizon=HORIZON_MONTHS, landmarks=LANDMARKS,
         n_folds=N_FOLDS, use_wandb=USE_WANDB,
         grid_betas=GRID_BETAS, grid_alphas=GRID_ALPHAS,
     )
@@ -137,7 +137,7 @@ def load_raw(data_path, fair_attr):
 
     # Numeric conversions
     for c in ["loan_amount", "interest_rate", "loan_term",
-              "loan_age", "current_upb"] + STATIC_COLS_FNMA + TVC_COLS_FNMA:
+              "loan_age", "current_upb"] + STATIC_COLS + TVC_COLS:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
 
@@ -237,7 +237,7 @@ def run_fairness_analysis(
     pp_rows  = []
 
     for attr_name in attrs:
-        group_names = GROUP_NAMES_FNMA[attr_name]
+        group_names = GROUP_NAMES[attr_name]
         s_stat = sens_by_attr_static[attr_name]
         s_dyn  = sens_by_attr_dynamic[attr_name]
 
@@ -324,11 +324,11 @@ def main():
     cfg  = load_config(args.config)
 
     out_dir = Path(args.out_dir) if args.out_dir else \
-              Path("outputs") / "fnma" / args.fair_attr
+              Path("outputs") / "realData" / args.fair_attr
     out_dir.mkdir(parents=True, exist_ok=True)
 
     run_tag = (
-        f"fnma_{args.fair_attr}"
+        f"realData_{args.fair_attr}"
         f"_S:{cfg['beta']}"
         f"_D:{cfg['alpha']}_{cfg['eo_mode_d']}"
     )
@@ -345,7 +345,7 @@ def main():
 
     enc_cat = OneHotEncoder(handle_unknown="ignore",
                              sparse_output=False, dtype=np.float32)
-    enc_cat.fit(df[CAT_COLS_FNMA])
+    enc_cat.fit(df[CAT_COLS])
 
     # Sensitive arrays for all three attributes (needed for fairness loop)
     sens_col_map = {
@@ -358,7 +358,7 @@ def main():
     print("\nBuilding STATIC dataset...")
     static_data = build_static(
         df=df,
-        static_cols=STATIC_COLS_FNMA, cat_cols=CAT_COLS_FNMA,
+        static_cols=STATIC_COLS, cat_cols=CAT_COLS,
         horizon=cfg["horizon"],
         id_col="loan_sequence_number", time_col="loan_age",
         first_event_col="FirstDefaultAge",
@@ -368,8 +368,8 @@ def main():
     print("\nBuilding DYNAMIC dataset...")
     dynamic_data = build_dynamic(
         df=df,
-        static_cols=STATIC_COLS_FNMA, tvc_cols=TVC_COLS_FNMA,
-        cat_cols=CAT_COLS_FNMA, landmarks=cfg["landmarks"],
+        static_cols=STATIC_COLS, tvc_cols=TVC_COLS,
+        cat_cols=CAT_COLS, landmarks=cfg["landmarks"],
         horizon=cfg["horizon"],
         id_col="loan_sequence_number", time_col="loan_age",
         first_event_col="FirstDefaultAge",
@@ -456,7 +456,7 @@ def main():
             grp_dynamic=dynamic_data["groups"],
             sens_dynamic=dynamic_data["sensitive"],
             lmk_vals=dynamic_data["lmk_vals"],
-            group_names=GROUP_NAMES_FNMA[args.fair_attr],
+            group_names=GROUP_NAMES[args.fair_attr],
             betas=cfg["grid_betas"], alphas=cfg["grid_alphas"],
             n_folds=cfg["n_folds"],
             eo_mode_d=cfg["eo_mode_d"],

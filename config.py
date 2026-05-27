@@ -1,37 +1,35 @@
 """
-config.py
-
-Global configuration for FairSurvival_CreditRisk.
+Global configuration for the project.
 All parameters are defined here and imported by experiments and src modules.
-Override per-experiment via experiments/configs/*.yaml or CLI arguments.
+
 """
 
 import torch
 
-# ── Device ────────────────────────────────────────────────────────────────────
+# Device 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ── Reproducibility ───────────────────────────────────────────────────────────
+# Reproducibility
 SEED = 42
 
-# ── Fairness penalty coefficients ────────────────────────────────────────────
+# Fairness penalty coefficients 
 BETA  = 0.0    # M_STATIC  EO penalty weight
 ALPHA = 0.0    # M_DYNAMIC EO penalty weight
 
-# ── EO penalty mode ───────────────────────────────────────────────────────────
+# EO penalty mode
 # Options: "mean" | "weighted" | "trend_aware" | "weighted+trend"
 EO_MODE_D = "trend_aware"   # dynamic model
 
-# ── Time schedule mode (alpha_schedule) ──────────────────────────────────────
+# Time schedule mode (alpha_schedule)
 # Options: "flat" | "decay" | "growth" | "u_shaped" | "early_focus"
 SCHEDULE_MODE_D = "decay"
 
-# ── MLP architecture ──────────────────────────────────────────────────────────
+# MLP architecture 
 HIDDEN1  = 64
 HIDDEN2  = 32
 DROPOUT  = 0.3
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# Training 
 LR           = 1e-3
 WEIGHT_DECAY = 1e-4
 N_EPOCHS     = 200
@@ -39,11 +37,11 @@ PATIENCE     = 30
 MIN_LR       = 1e-5
 PW_CLIP      = 20.0    # cap on pos_weight
 
-# ── Cross-validation ──────────────────────────────────────────────────────────
+# Cross-validation 
 N_FOLDS = 5
 
-# ── Simulation dataset ────────────────────────────────────────────────────────
-SCENARIO         = "fair"          # "fair" | "unfair"
+# Simulation dataset
+SCENARIO         = "fair"          # "fair" | "direct" | "proxy" | "temporal"
 HORIZON          = 3               # prediction horizon (periods)
 LANDMARKS        = list(range(1, 13))
 N_TEST_LANDMARKS = 12
@@ -62,31 +60,31 @@ ALL_NUM_COLS = STATIC_COLS + TVC_COLS
 ATTR_NAME   = "S"
 GROUP_NAMES = {0: "S0", 1: "S1"}
 
-# ── FNMA real dataset ─────────────────────────────────────────────────────────
+# Real dataset
 HORIZON_MONTHS = 12
-LANDMARKS_FNMA = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48]
+LANDMARKS = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48]
 
-STATIC_COLS_FNMA = [
+STATIC_COLS = [
     "credit_score", "original_dti", "original_ltv",
     "interest_rate", "loan_term", "num_borrowers",
 ]
-TVC_COLS_FNMA = [
+TVC_COLS = [
     "current_upb", "current_interest_rate", "estimated_ltv", "bd_pct",
 ]
-CAT_COLS_FNMA = ["occupancy_status_orig", "loan_purpose_orig"]
+CAT_COLS = ["occupancy_status_orig", "loan_purpose_orig"]
 
 FAIR_ATTR   = "SEX"    # "SEX" | "RACE" | "AGE"
-GROUP_NAMES_FNMA = {
+GROUP_NAMES = {
     "SEX":  {0: "Male",        1: "Female"},
     "RACE": {0: "White/Asian", 1: "Black/Indian"},
     "AGE":  {0: "Old",         1: "Young"},
 }
 
-# ── Grid search sweep values ──────────────────────────────────────────────────
+# Grid search
 GRID_BETAS  = [0.0, 0.3, 0.5, 0.7, 1.0]
 GRID_ALPHAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
 
-# ── W&B ───────────────────────────────────────────────────────────────────────
+# W&B
 USE_WANDB    = False
 WANDB_ENTITY = "alessia-ciccaglione02-"
 WANDB_PROJECT = "ThesisFairness"
