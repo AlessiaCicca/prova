@@ -80,6 +80,23 @@ GROUP_NAMES = {
     "AGE":  {0: "Old",         1: "Young"},
 }
 
+# Sampling
+SAMPLING = {
+    "random_seed":   42,
+    "target_loans":  100_000,
+    "w_default":     1.8,
+    "w_disc":        1.4,
+    "w_tvc":         1.5,
+    "w_base":        1.0,
+}
+
+RACE_MINORITY = {
+    "black or african american",
+    "american indian or alaska native",
+    "native hawaiian or other pacific islander",
+    "2 or more races"
+}
+
 # Grid search
 GRID_BETAS  = [0.0, 0.3, 0.5, 0.7, 1.0]
 GRID_ALPHAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
