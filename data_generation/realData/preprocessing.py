@@ -1,268 +1,340 @@
 """
-Stratified sampling from multi-year Freddie Mac panels.
-Produces panel_all_years_sampled.csv for model training.
+Preprocessing pipeline for real data analysis.
+Input:  panel_sampled.csv  (100k loans, longitudinal, raw)
+Output: panel_clean.csv    (ready for build_static / build_dynamic)
 
-
-DA SISTEMARE CON PREPROCESSING
+Steps:
+    1. Load raw panel (select relevant columns)
+    2. Numeric conversions + fix errate notazioni
+    3. Outlier capping
+    4. Compute bd_pct (balance deviation)
+    5. Compute trend features
+    6. Compute FirstDefaultAge
+    7. Encode demographics → binary (sex_bin, race_bin, age_bin)
+    8. Propagate per-loan demographic columns
+    9. Filter loans with too few observations
+    10. Save panel_clean.csv
 """
 
-import os
 import argparse
+import gc
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
-COLS = [
-    "loan_sequence_number",
-    "current_loan_delinquency_status",
+from config import STATIC_COLS, TVC_COLS, CAT_COLS
+
+
+
+PIPELINE_COLS = [
+    "loan_sequence_number",               # ID
+    "loan_age",                           # Time
+    "current_loan_delinquency_status",    
+    "derived_sex",                 
+    "derived_race",                    
+    "applicant_age",                   
+]
+
+RAW_COLS = (PIPELINE_COLS + STATIC_COLS + 
+    [c for c in TVC_COLS if c != "bd_pct"] + 
+    CAT_COLS)
+
+NUMERIC_COLS = [
     "loan_age",
-    "current_upb",
-    "current_interest_rate",
-    "estimated_ltv",
+    "credit_score", "original_dti", "original_ltv",
+    "first_time_homebuyer", "interest_rate", "loan_term",
+    "num_borrowers", "loan_amount",
+    "current_upb", "current_interest_rate", "estimated_ltv",
 ]
 
 
-# ── Pass 1: aggregate per-loan statistics ────────────────────────────────────
+MISSING_CODES = {
+    "credit_score": [9999],
+    "original_dti":    [999], 
+     "original_ltv": [999],
+     "first_time_homebuyer": [9],
+     "num_borrowers": [99],
+     "estimated_ltv":[999,998],
+     "occupancy_status_orig": [9],
+      "loan_purpose_orig": [9],
 
-def pass1_aggregate(output_path: str, years: range) -> pd.DataFrame:
-    """
-    Read all panel files in chunks and aggregate per-loan statistics:
-    ever_default, origin_year, max_age, std of TVC columns.
-    """
-    loan_data = {}
+}
 
-    for year in years:
-        filepath = os.path.join(output_path, f"panel_{year}.csv")
-        if not os.path.exists(filepath):
-            print(f"[SKIP] {filepath} not found")
+VALID_RANGES = {
+    "credit_score":          [(300, 850)],   # Data Dictionary
+    "original_dti":          [(1, 65)],      # Data Dictionary
+    "original_ltv":          [(0, 998)],     # Data Dictionary
+    "num_borrowers":         [(1, 10)],      # Data Dictionary
+    "current_interest_rate": [(0, None)],    # Peng & Lessmann (2026)
+    "estimated_ltv":         [(0, 500)],     # Peng & Lessmann (2026)
+    "current_upb":           [(0, None)],    # Peng & Lessmann (2026)
+}
+
+VALID_VALUES = {
+    "first_time_homebuyer":   ["Y", "N"],
+    "assistance_code": ["F","R","T"],
+    "occupancy_status_orig":  ["P", "I", "S"],  
+    "loan_purpose_orig":      ["P", "C", "N", "R"],  
+}
+
+
+# Returns 1 if loan is in default (delinquency status != 0), 0 otherwise
+def _is_default(s):
+    num = pd.to_numeric(s, errors="coerce")
+    return (num.notna() & (num != 0)).astype(np.int8).values
+
+# Computes the theoretical amortization schedule balance at age a. Used to compute bd_pct.
+def _scheduled_balance(orig_upb, r, N, a):
+    try:
+        orig_upb = float(orig_upb); r = float(r)
+        N = int(float(N));          a = float(a)
+    except Exception:
+        return np.nan
+    if any(np.isnan(x) for x in [orig_upb, r, N, a]):
+        return np.nan
+    if r > 1:
+        r /= 100.0
+    if r < 0 or N <= 0 or N > 1000:
+        return np.nan
+    rm = r / 12.0
+    if abs(rm) < 1e-10:
+        return max(0.0, orig_upb - (orig_upb / N) * a)
+    a = np.clip(a, 0, N)
+    try:
+        num = (1 + rm) ** N - (1 + rm) ** a
+        den = (1 + rm) ** N - 1
+        return max(0.0, orig_upb * num / den) if den != 0 else np.nan
+    except OverflowError:
+        return np.nan
+
+
+# Load raw panel selecting only relevant columns.
+def load_panel(path):
+    df = pd.read_csv(path, usecols=RAW_COLS, low_memory=False)
+    return df
+
+
+# Replace Freddie Mac special missing codes with NaN
+def replace_missing_codes(df):
+    for col, codes in MISSING_CODES.items():
+        if col in df.columns:
+            df[col] = df[col].replace(codes, np.nan)
+    return df
+
+# Replace values outside valid domain with NaN
+def replace_invalid_ranges(df):
+    # Numerical Range
+    for col, ranges in VALID_RANGES.items():
+        if col not in df.columns:
             continue
-        print(f"[PASS 1] {year}...")
+        n_before   = df[col].notna().sum()
+        valid_mask = pd.Series(False, index=df.index)
+        for (lo, hi) in ranges:
+                    mask = pd.Series(True, index=df.index)
+                    if lo is not None:
+                        mask &= df[col] >= lo
+                    if hi is not None:
+                        mask &= df[col] <= hi
+                    valid_mask |= mask
+        df[col] = df[col].where(valid_mask | df[col].isna(), other=np.nan)
+        n_replaced = n_before - df[col].notna().sum()
+      
+    # Categorical Range
+    for col, valid_vals in VALID_VALUES.items():
+        if col not in df.columns:
+            continue
+        n_before = df[col].notna().sum()
+        df[col]  = df[col].where(df[col].isin(valid_vals), other=np.nan)
+        n_replaced = n_before - df[col].notna().sum()
+    return df
 
-        for chunk in pd.read_csv(filepath, low_memory=False,
-                                  usecols=COLS, chunksize=100_000):
-            chunk["del"] = pd.to_numeric(
-                chunk["current_loan_delinquency_status"], errors="coerce"
-            ).fillna(0)
-            chunk["default"] = (chunk["del"] != 0).astype(int)
-
-            for col in ["loan_age", "current_upb",
-                        "current_interest_rate", "estimated_ltv"]:
-                chunk[col] = pd.to_numeric(chunk[col], errors="coerce")
-
-            for lid, grp in chunk.groupby("loan_sequence_number"):
-                if lid not in loan_data:
-                    loan_data[lid] = {
-                        "ever_default": 0,
-                        "origin_year":  year,
-                        "upb_vals":     [],
-                        "rate_vals":    [],
-                        "ltv_vals":     [],
-                    }
-                if grp["default"].max() == 1:
-                    loan_data[lid]["ever_default"] = 1
-                loan_data[lid]["max_age"] = max(
-                    loan_data[lid]["max_age"],
-                    grp["loan_age"].dropna().max()
-                    if grp["loan_age"].notna().any() else 0,
-                )
-                loan_data[lid]["upb_vals"].extend(
-                    grp["current_upb"].dropna().tolist()
-                )
-                loan_data[lid]["rate_vals"].extend(
-                    grp["current_interest_rate"].dropna().tolist()
-                )
-                loan_data[lid]["ltv_vals"].extend(
-                    grp["estimated_ltv"].dropna().tolist()
-                )
-
-    rows = []
-    for lid, d in loan_data.items():
-        rows.append({
-            "loan_id":      lid,
-            "ever_default": d["ever_default"],
-            "origin_year":  d["origin_year"],
-            "max_age":      d["max_age"],
-            "upb_std":      np.std(d["upb_vals"])  if len(d["upb_vals"])  > 1 else 0,
-            "rate_std":     np.std(d["rate_vals"]) if len(d["rate_vals"]) > 1 else 0,
-            "ltv_std":      np.std(d["ltv_vals"])  if len(d["ltv_vals"])  > 1 else 0,
-            "n_obs":        len(d["upb_vals"]),
-        })
-
-    del loan_data
-    loan_stats = pd.DataFrame(rows)
-
-    print(f"\nTotal loans  : {len(loan_stats):,}")
-    print(f"Defaulters   : {loan_stats['ever_default'].sum():,} "
-          f"({loan_stats['ever_default'].mean():.2%})")
-    return loan_stats
+# Numeric conversions 
+def convert_numerics(df):
+    for c in NUMERIC_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
+    return df
 
 
-# ── Stratified sampling ───────────────────────────────────────────────────────
+# Outlier capping
+def cap_outliers(df, lower=0.01, upper=0.99):
+    # Escludi colonne già gestite da replace_invalid_ranges
+    already_bounded = set(VALID_RANGES.keys()) | set(VALID_VALUES.keys())
+    cols_to_cap = [c for c in NUMERIC_COLS if c not in already_bounded]
+    
+    for col in cols_to_cap:
+        if col not in df.columns:
+            continue
+        p_low  = df[col].quantile(lower)
+        p_high = df[col].quantile(upper)
+        df[col] = df[col].clip(p_low, p_high)
+    return df
 
-def sample_loans(loan_stats: pd.DataFrame,
-                 max_default: int,
-                 default_rate: float,
-                 random_seed: int = 42) -> np.ndarray:
+# Fill nan with the previous observation for TVC -  Peng & Lessmann (2026)
+def fill_tvc_missing(df):
+    tvc_fill = [c for c in TVC_COLS if c != "bd_pct"]
+    df = df.sort_values(["loan_sequence_number", "loan_age"])
+    df[tvc_fill] = df.groupby("loan_sequence_number")[tvc_fill].ffill()
+    return df
+
+
+#  Balance deviation from theoretical amortization schedule.
+#   bd_pct = (current_upb - scheduled_balance) / scheduled_balance
+# Following Peng & Lessmann (2026) — "Incorporating data drift into survival analysis for credit risk"
+def compute_bd_pct(df):
+    print("  Computing bd_pct...")
+    df["b_sched"] = df.apply(
+        lambda r: _scheduled_balance(
+            r["loan_amount"], r["interest_rate"],
+            r["loan_term"],   r["loan_age"]
+        ), axis=1
+    ).astype("float32")
+    df["bd_pct"] = (
+        (df["current_upb"] - df["b_sched"]) / df["b_sched"]
+    ).replace([np.inf, -np.inf], np.nan).clip(-2, 2).astype("float32")
+    df.drop(columns=["b_sched"], inplace=True)
+    return df
+
+
+# Trend features 
+def compute_trends(df):
+    df = df.sort_values(["loan_sequence_number", "loan_age"])
+    for col in ["bd_pct", "estimated_ltv", "current_upb"]:
+        if col not in df.columns:
+            continue
+        df[f"{col}_trend"] = (
+            df.groupby("loan_sequence_number")[col]
+            .transform(lambda x: x - x.shift(2))
+        ).clip(-2, 2).fillna(0)
+    return df
+
+
+# VALUTA SE SERVE
+def compute_upb_delta(df):
     """
-    Sample loan IDs:
-      - All defaulters (capped at max_default, stratified by year)
-      - Non-defaulters with variable TVC to reach target default_rate
-      - Flat non-defaulters to fill remaining slots if needed
+    First-order difference of current_upb.
+    Captures short-term changes in repayment behavior.
+    Negative → principal repayment (normal)
+    Zero     → missed payment (risk signal)
+    Positive → loan restructuring or deferred capitalization (high risk)
+    
+    Reference: KAN paper (2024), ResE-BiLSTM (2025)
     """
-    np.random.seed(random_seed)
+    df = df.sort_values(["loan_sequence_number", "loan_age"])
+    df["current_upb_delta"] = df.groupby("loan_sequence_number")["current_upb"].diff().fillna(0)
+    return df
 
-    # ── Defaulters ────────────────────────────────────────────────────────────
-    all_defaults = loan_stats[loan_stats["ever_default"] == 1]
 
-    if len(all_defaults) > max_default:
-        all_defaults = (
-            all_defaults
-            .groupby("origin_year", group_keys=False)
-            .apply(lambda x: x.sample(
-                n=max(1, int(max_default * len(x) / len(all_defaults))),
-                random_state=random_seed,
-            ))
+
+# FirstDefaultAge: Compute the loan age at first default event.
+def compute_first_default_age(df):
+    is_def = _is_default(df["current_loan_delinquency_status"])
+    df["_is_default"] = is_def
+    fd_age = (
+        df[df["_is_default"] == 1]
+        .groupby("loan_sequence_number")["loan_age"].min()
+        .rename("FirstDefaultAge")
+    )
+    df = df.merge(fd_age, on="loan_sequence_number", how="left")
+    df.drop(columns=["_is_default", "current_loan_delinquency_status"],
+            inplace=True)
+
+    n_loans = df["loan_sequence_number"].nunique()
+    n_def   = df.groupby("loan_sequence_number")["FirstDefaultAge"].first().notna().sum()
+    print(f"  Loans: {n_loans:,}  |  Defaulters: {n_def:,} ({n_def/n_loans:.1%})")
+    return df
+
+
+# Demographics → binary
+def encode_demographics(df):
+ 
+    # Sex
+    if "derived_sex" in df.columns:
+        df["sex_bin"] = df["derived_sex"].str.lower().str.strip().map(
+            {"male": 0, "female": 1}
         )
 
-    g1_default = all_defaults["loan_id"].values
-    n_default  = len(g1_default)
+    # Race
+    def race_map(x):
+        if not isinstance(x, str): return np.nan
+        x = x.strip().lower()
+        if x in ["white", "asian"]: return 0
+        if x in ["black or african american",
+                  "american indian or alaska native",
+                  "native hawaiian or other pacific islander",
+                  "2 or more races", "other"]: return 1
+        return np.nan
 
-    # ── Non-defaulters with variable TVC ──────────────────────────────────────
-    g2_tvc = loan_stats[
-        (loan_stats["ever_default"] == 0) &
-        (
-            (loan_stats["upb_std"]  > 0) |
-            (loan_stats["rate_std"] > 0) |
-            (loan_stats["ltv_std"]  > 0)
-        )
-    ]["loan_id"].values
+    df["race_bin"] = df["derived_race"].apply(race_map)
 
-    target_non_default = int(n_default / default_rate) - n_default
-    n_g2       = min(len(g2_tvc), target_non_default)
-    sampled_g2 = np.random.choice(g2_tvc, size=n_g2, replace=False)
+    # Age
+    df["age_bin"] = df["applicant_age"].map(
+        {"<25": 1, "25-34": 0, "35-44": 0, "45-54": 0,
+         "55-64": 0, "65-74": 0, ">74": 0}
+    )
 
-    # ── Flat non-defaulters (filler if needed) ────────────────────────────────
-    remaining = target_non_default - n_g2
-    if remaining > 0:
-        g3_flat = loan_stats[
-            (loan_stats["ever_default"] == 0) &
-            (loan_stats["upb_std"] == 0)
-        ]["loan_id"].values
-        n_g3       = min(len(g3_flat), remaining)
-        sampled_g3 = np.random.choice(g3_flat, size=n_g3, replace=False)
-    else:
-        sampled_g3 = np.array([])
-
-    sampled_ids = np.concatenate([g1_default, sampled_g2, sampled_g3])
-
-    total = len(sampled_ids)
-    print(f"\nFinal sample : {total:,}")
-    print(f"  Defaulters : {n_default:,}  ({n_default/total:.1%})")
-    print(f"  TVC        : {n_g2:,}  ({n_g2/total:.1%})")
-    print(f"  Flat       : {len(sampled_g3):,}  ({len(sampled_g3)/total:.1%})")
-
-    return sampled_ids
+    return df
 
 
-# ── Pass 2: filter and concatenate ───────────────────────────────────────────
-
-def pass2_filter(output_path: str, years: range,
-                 sampled_set: set) -> pd.DataFrame:
-    """
-    Re-read all panel files and keep only sampled loan IDs.
-    Adds source_year column for temporal train/test splitting.
-    """
-    chunks = []
-
-    for year in years:
-        filepath = os.path.join(output_path, f"panel_{year}.csv")
-        if not os.path.exists(filepath):
+# Propagate per-loan demographics
+def propagate_demographics(df):
+    for col, name in [
+        ("sex_bin",  "sex_bin_loan"),
+        ("race_bin", "race_bin_loan"),
+        ("age_bin",  "age_bin_loan"),
+    ]:
+        if col not in df.columns:
             continue
-        print(f"[PASS 2] {year}...")
-
-        for chunk in pd.read_csv(filepath, low_memory=False, chunksize=100_000):
-            filtered = chunk[chunk["loan_sequence_number"].isin(sampled_set)]
-            if len(filtered) > 0:
-                filtered = filtered.copy()
-                filtered["source_year"] = year
-                chunks.append(filtered)
-
-    sampled_df = pd.concat(chunks, ignore_index=True)
-    del chunks
-    return sampled_df
+        per_loan = df.groupby("loan_sequence_number")[col].first().rename(name)
+        df = df.merge(per_loan, on="loan_sequence_number", how="left")
+    return df
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 
-def run_sampling(output_path: str, years: range,
-                 max_default: int = 10_000,
-                 default_rate: float = 0.30,
-                 random_seed: int = 42,
-                 out_filename: str = "panel_all_years_sampled.csv") -> None:
+#  Categorical encoding
+def encode_categoricals(df):
+    for col in CAT_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("category")
+    return df
 
-    print(f"\n{'='*60}")
-    print(f"  Years        : {list(years)}")
-    print(f"  Max default  : {max_default:,}")
-    print(f"  Default rate : {default_rate:.0%}")
-    print(f"  Output dir   : {output_path}")
-    print(f"{'='*60}\n")
+# MAIN
+def preprocess(path_in, path_out):
+    df = load_panel(path_in)
+    df = replace_missing_codes(df)
+    df = replace_invalid_ranges(df)
+    df = convert_numerics(df)
+    df = fill_tvc_missing(df) 
+    df = cap_outliers(df)
+    df = compute_bd_pct(df)
+    df = compute_trends(df)
+    df = compute_first_default_age(df)
+    df = encode_demographics(df)
+    df = propagate_demographics(df)
+    df = encode_categoricals(df)
 
-    # Pass 1
-    loan_stats  = pass1_aggregate(output_path, years)
-
-    # Sample
-    sampled_ids = sample_loans(loan_stats, max_default, default_rate, random_seed)
-    sampled_set = set(sampled_ids)
-
-    # Pass 2
-    print("\nFiltering panel files...")
-    sampled_df = pass2_filter(output_path, years, sampled_set)
-
-    # Save
-    out_file = os.path.join(output_path, out_filename)
-    sampled_df.to_csv(out_file, index=False)
-
-    print(f"\nSaved  : {out_file}")
-    print(f"Rows   : {len(sampled_df):,}")
-    print(f"Loans  : {sampled_df['loan_sequence_number'].nunique():,}")
+    print(f"\nSaving: {path_out}")
+    df.to_csv(path_out, index=False)
+    size_gb = os.path.getsize(path_out) / (1024**3)
+    print(f"  File size: {size_gb:.2f} GB")
+    return df
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Stratified sampling from multi-year Freddie Mac panels."
-    )
-    parser.add_argument(
-        "--output_path", required=True,
-        help="Directory containing panel_{YEAR}.csv files and output"
-    )
-    parser.add_argument(
-        "--years", nargs=2, type=int, default=[2018, 2024],
-        metavar=("START", "END"),
-        help="Year range inclusive (default: 2018 2024)"
-    )
-    parser.add_argument(
-        "--max_default", type=int, default=10_000,
-        help="Cap on total defaulters (default: 10000)"
-    )
-    parser.add_argument(
-        "--default_rate", type=float, default=0.30,
-        help="Target default rate in final dataset (default: 0.30)"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed (default: 42)"
-    )
-    parser.add_argument(
-        "--out_filename", default="panel_all_years_sampled.csv",
-        help="Output filename (default: panel_all_years_sampled.csv)"
-    )
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--path_in", required=True)
+
+    parser.add_argument("--path_out", required=True)
+
     args = parser.parse_args()
 
-    run_sampling(
-        output_path  = args.output_path,
-        years        = range(args.years[0], args.years[1] + 1),
-        max_default  = args.max_default,
-        default_rate = args.default_rate,
-        random_seed  = args.seed,
-        out_filename = args.out_filename,
-    )
+    preprocess(
+        path_in  = args.path_in,
+        path_out = args.path_out)

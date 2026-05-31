@@ -65,11 +65,11 @@ HORIZON_MONTHS = 12
 LANDMARKS = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48]
 
 STATIC_COLS = [
-    "credit_score", "original_dti", "original_ltv",
-    "interest_rate", "loan_term", "num_borrowers",
+    "credit_score", "original_dti", "original_ltv", "first_time_homebuyer",
+    "interest_rate", "loan_term", "num_borrowers", "loan_amount"
 ]
 TVC_COLS = [
-    "current_upb", "current_interest_rate", "estimated_ltv", "bd_pct",
+    "current_upb", "current_interest_rate", "estimated_ltv", "bd_pct", "assistance_code"
 ]
 CAT_COLS = ["occupancy_status_orig", "loan_purpose_orig"]
 

@@ -91,132 +91,6 @@ def load_config(config_path):
     return cfg
 
 
-
-def _is_default(s):
-    num = pd.to_numeric(s, errors="coerce")
-    return (num.notna() & (num != 0)).astype(np.int8).values
-
-
-def _scheduled_balance(orig_upb, r, N, a):
-    try:
-        orig_upb = float(orig_upb); r = float(r)
-        N = int(float(N));          a = float(a)
-    except Exception:
-        return np.nan
-    if any(np.isnan(x) for x in [orig_upb, r, N, a]):
-        return np.nan
-    if r > 1:
-        r /= 100.0
-    if r < 0 or N <= 0 or N > 1000:
-        return np.nan
-    rm = r / 12.0
-    if abs(rm) < 1e-10:
-        return max(0.0, orig_upb - (orig_upb / N) * a)
-    a = np.clip(a, 0, N)
-    try:
-        num = (1 + rm) ** N - (1 + rm) ** a
-        den = (1 + rm) ** N - 1
-        return max(0.0, orig_upb * num / den) if den != 0 else np.nan
-    except OverflowError:
-        return np.nan
-
-
-# Data loading: load panel, compute features, demographics, and FirstDefaultAge
-def load_raw(data_path, fair_attr):
-    print(f"Loading: {data_path}")
-    df = pd.read_csv(data_path, usecols=[
-        "loan_sequence_number", "loan_age", "loan_term",
-        "current_upb", "current_interest_rate", "estimated_ltv",
-        "current_loan_delinquency_status", "loan_amount",
-        "original_ltv", "original_dti", "credit_score",
-        "interest_rate", "num_borrowers",
-        "occupancy_status_orig", "loan_purpose_orig",
-        "applicant_sex", "derived_race", "applicant_age",
-    ], low_memory=False)
-    print(f"  Rows: {len(df):,}  |  Loans: {df['loan_sequence_number'].nunique():,}")
-
-    # Numeric conversions
-    for c in ["loan_amount", "interest_rate", "loan_term",
-              "loan_age", "current_upb"] + STATIC_COLS + TVC_COLS:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
-
-    # BD_pct — balance deviation vs amortisation schedule
-    print("  Computing bd_pct...")
-    df["b_sched"] = df.apply(
-        lambda r: _scheduled_balance(
-            r["loan_amount"], r["interest_rate"],
-            r["loan_term"],   r["loan_age"]
-        ), axis=1
-    ).astype("float32")
-    df["bd_pct"] = (
-        (df["current_upb"] - df["b_sched"]) / df["b_sched"]
-    ).replace([np.inf, -np.inf], np.nan).clip(-2, 2).astype("float32")
-
-    # Trend features
-    df = df.sort_values(["loan_sequence_number", "loan_age"])
-    for col in ["bd_pct", "estimated_ltv", "current_upb"]:
-        df[f"{col}_trend"] = (
-            df.groupby("loan_sequence_number")[col]
-            .transform(lambda x: x - x.shift(2))
-        ).clip(-2, 2).fillna(0)
-
-    # Categorical
-    df["occupancy_status_orig"] = df["occupancy_status_orig"].astype("category")
-    df["loan_purpose_orig"]     = df["loan_purpose_orig"].astype("category")
-
-    # Demographics → binary
-    df["sex_bin"]  = df["applicant_sex"].map({1: 0, 2: 1})
-
-    def race_map(x):
-        if not isinstance(x, str): return np.nan
-        x = x.strip().lower()
-        if x in ["white", "asian"]: return 0
-        if x in ["black or african american",
-                  "american indian or alaska native",
-                  "native hawaiian or other pacific islander",
-                  "2 or more races", "other"]: return 1
-        return np.nan
-
-    df["race_bin"] = df["derived_race"].apply(race_map)
-    df["age_bin"]  = df["applicant_age"].map(
-        {"<25": 1, "25-34": 0, "35-44": 0, "45-54": 0,
-         "55-64": 0, "65-74": 0, ">74": 0}
-    )
-
-    for col, name in [("sex_bin",  "sex_bin_loan"),
-                       ("race_bin", "race_bin_loan"),
-                       ("age_bin",  "age_bin_loan")]:
-        per_loan = df.groupby("loan_sequence_number")[col].first().rename(name)
-        df = df.merge(per_loan, on="loan_sequence_number", how="left")
-
-    # Default flag → FirstDefaultAge
-    is_def = _is_default(df["current_loan_delinquency_status"])
-    df["_is_default"] = is_def
-    fd_age = (
-        df[df["_is_default"] == 1]
-        .groupby("loan_sequence_number")["loan_age"].min()
-        .rename("FirstDefaultAge")
-    )
-    df = df.merge(fd_age, on="loan_sequence_number", how="left")
-    df.drop(columns=["_is_default",
-                      "current_loan_delinquency_status"], inplace=True)
-
-    n_loans = df["loan_sequence_number"].nunique()
-    n_def   = df.groupby("loan_sequence_number")["FirstDefaultAge"].first().notna().sum()
-    print(f"  Loans: {n_loans:,}  |  Defaulters: {n_def:,} ({n_def/n_loans:.1%})")
-
-    # sensitive attribute column name
-    sens_col_map = {
-        "SEX":  "sex_bin_loan",
-        "RACE": "race_bin_loan",
-        "AGE":  "age_bin_loan",
-    }
-    df["sens_loan"] = df[sens_col_map[fair_attr]]
-
-    return df
-
-
 #  Fairness analysis 
 def run_fairness_analysis(
     y_static, static_oof, sens_by_attr_static,
@@ -338,14 +212,8 @@ def main():
     print(f"  Attr      : {args.fair_attr}")
     print(f"{'='*60}\n")
 
-    # Load raw 
-    df = load_raw(args.data_path, args.fair_attr)
-
-    trend_cols = ["bd_pct_trend", "estimated_ltv_trend", "current_upb_trend"]
-
-    enc_cat = OneHotEncoder(handle_unknown="ignore",
-                             sparse_output=False, dtype=np.float32)
-    enc_cat.fit(df[CAT_COLS])
+    # Load preprocessed data 
+    df = pd.read_csv(args.data_path, low_memory=False)
 
     # Sensitive arrays for all three attributes (needed for fairness loop)
     sens_col_map = {
@@ -353,6 +221,14 @@ def main():
         "RACE": "race_bin_loan",
         "AGE":  "age_bin_loan",
     }
+    
+    df["sens_loan"] = df[sens_col_map[args.fair_attr]] 
+
+    trend_cols = ["bd_pct_trend", "estimated_ltv_trend", "current_upb_trend"]
+
+    enc_cat = OneHotEncoder(handle_unknown="ignore",
+                             sparse_output=False, dtype=np.float32)
+    enc_cat.fit(df[CAT_COLS])
 
     # Build datasets
     print("\nBuilding STATIC dataset...")
