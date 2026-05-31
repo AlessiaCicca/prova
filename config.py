@@ -102,6 +102,6 @@ GRID_BETAS  = [0.0, 0.3, 0.5, 0.7, 1.0]
 GRID_ALPHAS = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2]
 
 # W&B
-USE_WANDB    = False
+USE_WANDB    = True
 WANDB_ENTITY = "alessia-ciccaglione02-"
 WANDB_PROJECT = "ThesisFairness"
