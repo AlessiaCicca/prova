@@ -174,7 +174,6 @@ def run_fairness_analysis(
 
     agg_rows = []
     dyn_rows = []
-    pp_rows  = []
 
     for attr_name in attrs:
         group_names = GROUP_NAMES[attr_name]
@@ -223,12 +222,11 @@ def run_fairness_analysis(
 
     df_agg     = pd.DataFrame(agg_rows)
     df_dyn_lmk = pd.DataFrame(dyn_rows)
-    df_pp_age  = pd.DataFrame(pp_rows)
+
 
     df_agg.to_csv(out_dir / "fairness_aggregate.csv", index=False)
     df_dyn_lmk.to_csv(out_dir / "fairness_dynamic_by_landmark.csv", index=False)
-    df_pp_age.to_csv(out_dir / "fairness_pp_by_age.csv", index=False)
-
+ 
     # AUC fairness
     df_auc = auc_fairness_all_models(
         df_dynamic=df_dyn_lmk, df_static_agg=df_agg,
@@ -433,9 +431,7 @@ def main():
             prefix = f"{row['model'].lower()}/{args.fair_attr}/aggregate"
             wandb.log({
                 f"{prefix}/separation":   row.get("separation"),
-                f"{prefix}/independence": row.get("independence"),
-                f"{prefix}/sufficiency":  row.get("sufficiency"),
-            })
+                })
 
         # AUC fairness
         for _, row in df_auc.iterrows():
@@ -450,7 +446,6 @@ def main():
             L = int(row["landmark"])
             wandb.log({
                 f"dynamic/{args.fair_attr}/landmark_{L}/separation":   row.get("separation"),
-                f"dynamic/{args.fair_attr}/landmark_{L}/independence": row.get("independence"),
             })
 
         for attr_name in ["SEX", "RACE", "AGE"]:
@@ -462,7 +457,6 @@ def main():
         if sep_plot.exists():
             wandb.log({"fairness_separation_plot": wandb.Image(str(sep_plot))})
 
-        wandb.finish()
 
     # Grid search
     if args.grid_search:
@@ -485,6 +479,19 @@ def main():
             out_dir=out_dir, run_tag=run_tag,
         )
         plot_tradeoff(df_grid, out_dir=out_dir, run_tag=run_tag)
+
+        if cfg["use_wandb"]:
+             
+          df_grid.to_csv(out_dir / "grid_search_results.csv", index=False)
+          
+          for img_path in out_dir.glob(f"*{run_tag}*.png"):
+              wandb.log({f"grid_search/{img_path.stem}": wandb.Image(str(img_path))})
+          
+
+
+    if cfg["use_wandb"]:
+        import wandb
+        wandb.finish()
 
     print(f"\nAll outputs saved in: {out_dir}")
 

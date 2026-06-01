@@ -1,5 +1,4 @@
 EDA del file clean
 Migliorare feature engineering e model
 Controlla questione validation set
-CHECK COLONNE CONSIDERATE nel sampling
 valuta se mantenere o togliere le trend columns

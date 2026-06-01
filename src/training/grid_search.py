@@ -321,6 +321,3 @@ def plot_tradeoff(df_grid, out_dir, run_tag="run"):
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.show()
     return plot_path
-    plt.show()
-
-    return plot_path

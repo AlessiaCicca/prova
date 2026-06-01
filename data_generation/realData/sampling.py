@@ -9,7 +9,7 @@ import os
 import sys
 sys.path.append("/content/DynamicSurvival_FairCreditScoring")
 
-from config import (SAMPLING, RACE_MINORITY, TVC_COLS)
+from config import (SAMPLING, RACE_MINORITY, TVC_COLS,STATIC_COLS)
 
 
 
@@ -319,22 +319,20 @@ W_TVC        = SAMPLING["w_tvc"]
 W_BASE       = SAMPLING["w_base"]
 
 
-tvc_cols = [col for col in TVC_COLS if col != "bd_pct"]
+
+tvc_cols = [col for col in TVC_COLS if col not in ("bd_pct", "current_upb_delta")]
 race_minority = RACE_MINORITY
 
 usecols_demo = ["loan_sequence_number", "derived_race", "derived_sex", "applicant_age"]
 
-usecols_feat = [
-    "loan_sequence_number", "derived_race", "derived_sex", "applicant_age",
-    "loan_amount", "interest_rate", "credit_score", "income",
-    "num_borrowers", "property_value",
-    "current_loan_delinquency_status", "current_upb",
-    "current_interest_rate", "estimated_ltv"
-]
+usecols_feat = (
+    ["loan_sequence_number", "current_loan_delinquency_status"] +
+    usecols_demo[1:] +  
+    STATIC_COLS +
+    tvc_cols
+)
 
-
-feature_cols = ["loan_amount", "interest_rate", "credit_score",
-                "income", "num_borrowers", "property_value"]
+feature_cols = STATIC_COLS + tvc_cols
 
 # MAIN
 def run_sampling(path, out_full, out_sampled, config):
@@ -344,15 +342,15 @@ def run_sampling(path, out_full, out_sampled, config):
           f"disc={config['w_disc']} tvc={config['w_tvc']}")
     print(f"{'='*60}\n")
 
-    #unique_panel(path, out_full)
+    unique_panel(path, out_full)
     
     disc_loan_ids = find_discriminated_loans(out_full, RACE_MINORITY)
     loan_stats = aggregate_loans(out_full, usecols_feat, tvc_cols, feature_cols, disc_loan_ids)
 
     df_sampled = weighted_sample(loan_stats, config)
 
-    #sampled_ids = set(df_sampled["loan_sequence_number"].astype(str))
-    #filter_panel(out_full, sampled_ids,out_sampled )
+    sampled_ids = set(df_sampled["loan_sequence_number"].astype(str))
+    filter_panel(out_full, sampled_ids,out_sampled )
 
 
     evaluate_sampling(loan_stats, df_sampled, feature_cols, race_minority)
