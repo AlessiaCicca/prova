@@ -63,6 +63,8 @@ def run_cv(X, y, groups, sensitive,
     model_last   = None
     scaler_last  = None
 
+    thresholds = []
+
     for fold, (tr, te) in enumerate(gkf.split(X, y, groups)):
         # train MLP on training fold, get predictions on both train and test
         p_te, p_tr, model, scaler = train_mlp(
@@ -78,6 +80,7 @@ def run_cv(X, y, groups, sensitive,
         oof_preds[te] = p_te
         # threshold computed on train fold to avoid data leakage
         best_th       = find_best_threshold(y[tr], p_tr)
+        thresholds.append(best_th)
         # compute AUC, Brier, F1 on test fold
         metrics_list.append(metrics_all(y[te].astype(int), p_te, threshold=best_th))
         print(
@@ -100,6 +103,7 @@ def run_cv(X, y, groups, sensitive,
         oof_preds   = oof_preds,
         metrics     = metrics_list,
         summary     = summary,
+        threshold   = float(np.mean(thresholds)),
         model_last  = model_last,
         scaler_last = scaler_last,
     )

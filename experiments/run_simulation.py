@@ -137,10 +137,7 @@ def load_raw(data_dir, scenario):
 def run_fairness_analysis(
     y_static, static_oof, sens_static,
     y_dynamic, dynamic_oof, sens_dynamic, lmk_vals,
-    out_dir, cfg):
-
-    th_static  = find_best_threshold(y_static,  static_oof)
-    th_dynamic = find_best_threshold(y_dynamic, dynamic_oof)
+    out_dir, cfg, th_static, th_dynamic):
 
     ybin_static  = (static_oof  >= th_static ).astype(int)
     ybin_dynamic = (dynamic_oof >= th_dynamic).astype(int)
@@ -345,6 +342,9 @@ def main():
     print("FAIRNESS ANALYSIS")
     print("="*60)
 
+    th_static  = res_static["threshold"]
+    th_dynamic = res_dynamic["threshold"]
+
     df_agg, df_dyn_lmk, df_auc=run_fairness_analysis(
         y_static=static_data["y"],
         static_oof=res_static["oof_preds"],
@@ -354,6 +354,7 @@ def main():
         sens_dynamic=dynamic_data["sensitive"],
         lmk_vals=dynamic_data["lmk_vals"],
         out_dir=out_dir, cfg=cfg,
+        th_static=th_static, th_dynamic=th_dynamic
     )
 
     if cfg["use_wandb"]:

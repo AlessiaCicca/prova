@@ -20,6 +20,8 @@ from sklearn.preprocessing import OneHotEncoder
 import sys
 from pathlib import Path
 
+from sklearn.metrics import roc_auc_score
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -92,82 +94,84 @@ def load_config(config_path):
             overrides = yaml.safe_load(f)
         cfg.update(overrides or {})
     return cfg
-def run_feature_importance(static_data, dynamic_data, out_dir, use_wandb=False):
-    """
-    Compute feature importance using LightGBM + SHAP.
-    Runs on both static and dynamic datasets.
-    """
-    import lightgbm as lgb
-    import shap
+
+
+def run_feature_importance(static_data, dynamic_data, 
+                            res_static, res_dynamic,
+                            out_dir, use_wandb=False):
     import matplotlib.pyplot as plt
 
     print("\n" + "="*60)
     print("FEATURE IMPORTANCE")
     print("="*60)
 
-    for name, data in [("M_STATIC", static_data), ("M_DYNAMIC", dynamic_data)]:
-        print(f"\n--- {name} ---")
-
-        X            = data["X"]
-        y            = data["y"]
+    for name, data, res in [
+        ("M_STATIC",  static_data,  res_static),
+        ("M_DYNAMIC", dynamic_data, res_dynamic),
+    ]:
+        model  = res["model_last"]
+        scaler = res["scaler_last"]
+        X      = data["X"]
+        y      = data["y"]
         feature_names = data["feature_names"]
 
-        # Train LightGBM veloce
-        model = lgb.LGBMClassifier(
-            n_estimators=200,
-            learning_rate=0.05,
-            num_leaves=31,
-            random_state=42,
-            verbose=-1,
-        )
-        model.fit(X, y)
+        # Scala con lo stesso scaler usato in training
+        X_s = scaler.transform(X).astype(np.float32)
+        X_s = np.nan_to_num(X_s, nan=0., posinf=5., neginf=-5.)
 
-        # SHAP values
-        explainer   = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X)
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]
+        # AUC baseline
+        model.eval()
+        with torch.no_grad():
+            baseline_preds = torch.sigmoid(
+                model(torch.tensor(X_s, device=DEVICE))
+            ).cpu().numpy()
+        baseline_auc = roc_auc_score(y, baseline_preds)
 
-        # Mean absolute SHAP per feature
-        mean_shap = np.abs(shap_values).mean(axis=0)
+        # Permutation importance
+        importances = []
+        for i in range(X_s.shape[1]):
+            X_perm = X_s.copy()
+            np.random.shuffle(X_perm[:, i])   # mescola la feature i
+            with torch.no_grad():
+                perm_preds = torch.sigmoid(
+                    model(torch.tensor(X_perm, device=DEVICE))
+                ).cpu().numpy()
+            perm_auc = roc_auc_score(y, perm_preds)
+            importances.append(baseline_auc - perm_auc)  # calo AUC
+
         df_imp = pd.DataFrame({
             "feature":    feature_names,
-            "importance": mean_shap,
+            "importance": importances,
         }).sort_values("importance", ascending=False)
 
-        print(df_imp.to_string(index=False))
+        print(f"\n--- {name} (baseline AUC={baseline_auc:.4f}) ---")
+        print(df_imp.head(15).to_string(index=False))
         df_imp.to_csv(out_dir / f"feature_importance_{name.lower()}.csv", index=False)
 
-        # Plot — top 20 features per leggibilità
-        top = df_imp.head(20)
-        fig, ax = plt.subplots(figsize=(10, 7))
+        # Plot top 15
+        top = df_imp.head(35)
+        fig, ax = plt.subplots(figsize=(10, 6))
         ax.barh(top["feature"][::-1], top["importance"][::-1], color="#4C72B0")
-        ax.set_xlabel("Mean |SHAP value|")
-        ax.set_title(f"Feature Importance (SHAP) — {name} (top 20)")
+        ax.set_xlabel("AUC drop (↑ more important)")
+        ax.set_title(f"Permutation Importance — {name}")
+        ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
         ax.grid(axis="x", alpha=0.3)
         plt.tight_layout()
         plot_path = out_dir / f"feature_importance_{name.lower()}.png"
         plt.savefig(plot_path, dpi=150)
         plt.close(fig)
-        print(f"  Saved: {plot_path}")
 
         if use_wandb:
             import wandb
             wandb.log({f"feature_importance/{name}": wandb.Image(str(plot_path))})
-            wandb.log({f"shap/{name}/{row['feature']}": row["importance"]
-                       for _, row in df_imp.iterrows()})
 
 #  Fairness analysis 
 def run_fairness_analysis(
     y_static, static_oof, sens_by_attr_static,
     y_dynamic, dynamic_oof, sens_by_attr_dynamic, lmk_vals,
-    out_dir, cfg):
+    out_dir, cfg,  th_static, th_dynamic):
 
     attrs = ["SEX", "RACE", "AGE"]
-
-    th_static  = find_best_threshold(y_static,  static_oof)
-    th_dynamic = find_best_threshold(y_dynamic, dynamic_oof)
-    
 
     ybin_static  = (static_oof  >= th_static ).astype(int)
     ybin_dynamic = (dynamic_oof >= th_dynamic).astype(int)
@@ -310,7 +314,7 @@ def main():
     
     df["sens_loan"] = df[sens_col_map[args.fair_attr]] 
 
-    #trend_cols = ["bd_pct_trend", "estimated_ltv_trend", "current_upb_trend"]
+    trend_cols = ["bd_pct_trend", "estimated_ltv_trend", "current_upb_trend"]
 
     enc_cat = OneHotEncoder(handle_unknown="ignore",
                              sparse_output=False, dtype=np.float32)
@@ -330,7 +334,7 @@ def main():
     print("\nBuilding DYNAMIC dataset...")
     dynamic_data = build_dynamic(
         df=df,
-        static_cols=STATIC_COLS, tvc_cols=TVC_COLS,
+        static_cols=STATIC_COLS, tvc_cols=TVC_COLS+trend_cols,
         cat_cols=CAT_COLS, landmarks=cfg["landmarks"],
         horizon=cfg["horizon"],
         id_col="loan_sequence_number", time_col="loan_age",
@@ -400,18 +404,21 @@ def main():
                 f"{m}/F1_Mean":    row["F1_Mean"],
                 f"{m}/F1_SD":      row["F1_SD"],
             })
-
-    #run_feature_importance(
-    #    static_data  = static_data,
-    #    dynamic_data = dynamic_data,
-    #    out_dir      = out_dir,
-    #    use_wandb    = cfg["use_wandb"],
-    #)
-    
+    run_feature_importance(
+        static_data  = static_data,
+        dynamic_data = dynamic_data,
+        res_static   = res_static,
+        res_dynamic  = res_dynamic,
+        out_dir      = out_dir,
+        use_wandb    = cfg["use_wandb"],
+    )
     # Fairness analysis
     print("\n" + "="*60)
     print("FAIRNESS ANALYSIS")
     print("="*60)
+
+    th_static  = res_static["threshold"]
+    th_dynamic = res_dynamic["threshold"]
 
     df_agg, df_dyn_lmk, df_auc =run_fairness_analysis(
         y_static=static_data["y"],
@@ -421,7 +428,8 @@ def main():
         dynamic_oof=res_dynamic["oof_preds"],
         sens_by_attr_dynamic=dyn_sens_by_attr,
         lmk_vals=dynamic_data["lmk_vals"],
-        out_dir=out_dir, cfg=cfg,
+        out_dir=out_dir, cfg=cfg, th_static=th_static,
+        th_dynamic=th_dynamic
     )
 
     if cfg["use_wandb"]:
