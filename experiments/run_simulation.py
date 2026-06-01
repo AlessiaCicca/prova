@@ -364,8 +364,6 @@ def main():
             prefix = f"{row['model'].lower()}/aggregate"
             wandb.log({
                 f"{prefix}/separation":   row.get("separation"),
-                f"{prefix}/independence": row.get("independence"),
-                f"{prefix}/sufficiency":  row.get("sufficiency"),
             })
 
         # AUC fairness
@@ -381,7 +379,6 @@ def main():
             L = int(row["landmark"])
             wandb.log({
                 f"dynamic/landmark_{L}/separation":   row.get("separation"),
-                f"dynamic//landmark_{L}/independence": row.get("independence"),
             })
 
         img_path = out_dir / f"fairness_auc_.png"
