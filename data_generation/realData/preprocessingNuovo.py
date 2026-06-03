@@ -279,7 +279,7 @@ def encode_demographics(df):
 
     # Age
     df["age_bin"] = df["applicant_age"].map(
-        {"<25": 1, "25-34": 0, "35-44": 0, "45-54": 0,
+        {"<25": 1, "25-34": 1, "35-44": 0, "45-54": 0,
          "55-64": 0, "65-74": 0, ">74": 0}
     )
 
@@ -325,7 +325,7 @@ def preprocess(path_in, path_out):
     df = propagate_demographics(df)
     df = encode_categoricals(df)
 
-    df.drop(columns=["loan_amount"], inplace=True)  # ← non serve nel CSV finale
+    df.drop(columns=["loan_amount"], inplace=True)  
 
 
     print(f"\nSaving: {path_out}")

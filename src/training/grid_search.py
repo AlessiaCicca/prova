@@ -208,32 +208,50 @@ def run_grid_search(
 
 # Compute best trade-off point for each model
 def _compute_best(df_grid):
-    # min-max to perform normalization
-    auc_min, auc_max = df_grid["auc_mean"].min(), df_grid["auc_mean"].max()
-    sep_min, sep_max = df_grid["separation_auc"].min(), df_grid["separation_auc"].max()
+    """
+    M_STATIC:  minimizes separation using normalized AUC vs sep trade-off score
+    M_DYNAMIC: minimizes separation subject to AUC >= static baseline AUC (beta=0)
+    """
+  
+    static_baseline = df_grid[
+        (df_grid["model"] == "M_STATIC") & (df_grid["coef"] == 0.0)
+    ]["auc_mean"].values
+    static_auc = float(static_baseline[0]) if len(static_baseline) > 0 else 0.0
+
+
+    sub_s_all = df_grid[df_grid["model"] == "M_STATIC"]\
+                    .dropna(subset=["auc_mean", "separation_auc"])\
+                    .reset_index(drop=True)
+    auc_min = sub_s_all["auc_mean"].min()
+    auc_max = sub_s_all["auc_mean"].max()
+    sep_min = sub_s_all["separation_auc"].min()
+    sep_max = sub_s_all["separation_auc"].max()
 
     def trade_score(auc, sep):
-        # Normalization: same scale to be compared
         auc_n = (auc - auc_min) / (auc_max - auc_min + 1e-9)
         sep_n = (sep - sep_min) / (sep_max - sep_min + 1e-9)
         return auc_n - sep_n
 
     best_per_model = {}
-    for model_name in ["M_STATIC", "M_DYNAMIC"]:
-        sub = df_grid[df_grid["model"] == model_name]\
+
+ 
+    if not sub_s_all.empty:
+        scores = np.array([trade_score(a, s) for a, s in
+                           zip(sub_s_all["auc_mean"], sub_s_all["separation_auc"])])
+        best_per_model["M_STATIC"] = sub_s_all.iloc[np.argmax(scores)]
+
+
+    sub_d = df_grid[df_grid["model"] == "M_DYNAMIC"]\
                 .dropna(subset=["auc_mean", "separation_auc"])\
                 .reset_index(drop=True)
-        if sub.empty:
-            continue
-        
-        # High auc_norm → accurate model / Low sep_norm → fair model / High score → both simultaneously
-        # As consequence the best coefficient is computed as max of the difference between auc_norm and sep_norm
-        scores   = np.array([trade_score(a, s) for a, s in
-                             zip(sub["auc_mean"], sub["separation_auc"])])
-        best_per_model[model_name] = sub.iloc[np.argmax(scores)]
+    feasible_d = sub_d[sub_d["auc_mean"] >= static_auc]
+    if feasible_d.empty:
+        feasible_d = sub_d  # fallback
+    best_per_model["M_DYNAMIC"] = feasible_d.loc[
+        feasible_d["separation_auc"].idxmin()
+    ]
 
     return best_per_model, trade_score
-
 
 def print_best_points(df_grid, out_dir):
     best_per_model, _ = _compute_best(df_grid)
@@ -258,6 +276,12 @@ def print_best_points(df_grid, out_dir):
 def plot_tradeoff(df_grid, out_dir, run_tag="run"):
     best_per_model, trade_score = _compute_best(df_grid)
 
+    # Static baseline AUC (beta=0) — used as constraint for dynamic
+    static_auc_baseline = df_grid[
+        (df_grid["model"] == "M_STATIC") & (df_grid["coef"] == 0.0)
+    ]["auc_mean"].values
+    static_auc_baseline = float(static_auc_baseline[0]) if len(static_auc_baseline) > 0 else 0.0
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     fig.suptitle("AUC and Separation AUC as a function of λ\n",
                  fontsize=13, fontweight="bold", y=1.02)
@@ -276,13 +300,28 @@ def plot_tradeoff(df_grid, out_dir, run_tag="run"):
         seps     = sub["separation_auc"].to_numpy()
         color    = style["color"]
         clabel   = style["coef_label"]
-        best_idx = np.argmax([trade_score(a, s) for a, s in zip(aucs, seps)])
+
+        # Different best_idx criterion for static vs dynamic
+        if model_name == "M_DYNAMIC":
+            feasible_mask = aucs >= static_auc_baseline
+            if feasible_mask.any():
+                feasible_seps = np.where(feasible_mask, seps, np.inf)
+                best_idx = int(np.argmin(feasible_seps))
+            else:
+                best_idx = int(np.argmin(seps))
+        else:
+            best_idx = int(np.argmax([trade_score(a, s) for a, s in zip(aucs, seps)]))
 
         ax2 = ax.twinx()
         ax.plot(coefs, aucs, color=color, linewidth=2.2,
                 marker=style["marker"], markersize=7, zorder=3)
         ax2.plot(coefs, seps, color=color, linewidth=2.2, linestyle="--",
                  marker=style["marker"], markersize=7, alpha=0.55, zorder=3)
+
+        # Draw vertical line at static_auc_baseline for dynamic plot
+        if model_name == "M_DYNAMIC":
+            ax.axhline(y=static_auc_baseline, color="gray", linestyle=":",
+                       linewidth=1.5, alpha=0.7, label=f"Static AUC baseline ({static_auc_baseline:.3f})")
 
         for c, a in zip(coefs, aucs):
             ax.annotate(f"{clabel}={c:.1f}", xy=(c, a),
@@ -313,14 +352,20 @@ def plot_tradeoff(df_grid, out_dir, run_tag="run"):
         ax.set_title(model_name, fontsize=12, fontweight="bold", color=color)
         ax.grid(alpha=0.2, linestyle="--")
 
-        ax.legend(handles=[
+        legend_handles = [
             Line2D([0], [0], color=color, linewidth=2,
                    marker=style["marker"], label="AUC (solid)"),
             Line2D([0], [0], color=color, linewidth=2, linestyle="--",
                    marker=style["marker"], alpha=0.55, label="Separation AUC (dashed)"),
             Line2D([0], [0], marker="*", color="gold", markersize=11,
-                   markeredgecolor=color, linewidth=0, label="Best trade-off (★)"),
-        ], fontsize=8, loc="lower left", framealpha=0.9)
+                   markeredgecolor=color, linewidth=0, label="Best λ* (★)"),
+        ]
+        if model_name == "M_DYNAMIC":
+            legend_handles.append(
+                Line2D([0], [0], color="gray", linestyle=":", linewidth=1.5,
+                       label=f"Static AUC baseline ({static_auc_baseline:.3f})")
+            )
+        ax.legend(handles=legend_handles, fontsize=8, loc="lower left", framealpha=0.9)
 
     plt.tight_layout()
     plot_path = out_dir / f"tradeoff_{run_tag}.png"

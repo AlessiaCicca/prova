@@ -26,7 +26,7 @@ def alpha_schedule(epoch, time_val, max_epoch=200, warmup=50,
 def equalized_odds_loss_dynamic(
     label_pred, sensitive, label_true, time_vals,
     mode="trend_aware",
-    min_group_frac=0.03,
+    min_group_frac=0.01,
     trend_weight=0.4,
     current_epoch=0,
     time_schedule_mode="flat", 
@@ -62,6 +62,8 @@ def equalized_odds_loss_dynamic(
 
             n_s0 = (s == 0).sum().item()
             n_s1 = (s == 1).sum().item()
+            min_group_frac=0.01
+            # era a 0.03 per sex
             min_n = max(5, int(min_group_frac * (n_s0 + n_s1)))
             if min(n_s0, n_s1) < min_n:
                 continue
@@ -143,7 +145,7 @@ def equalized_odds_loss_dynamic(
               n_s1 = (s == 1).sum().item()
 
 
-              min_frac = 0.05 
+              min_frac = 0.01 
               if min(n_s0, n_s1) < max(10, int(min_frac * (n_s0 + n_s1))):
                  continue
 
@@ -169,8 +171,15 @@ def equalized_odds_loss_dynamic(
               eo_t = torch.abs(fpr_sbar - fpr_s) + torch.abs(fnr_sbar - fnr_s)
 
               if torch.isfinite(eo_t):
-                  eo_per_t.append(eo_t)
-                  weights.append(mask.sum().float())
+                
+                a_t = alpha_schedule(
+                    epoch=current_epoch,
+                    time_val=t.item(),
+                    mode=time_schedule_mode,
+                )
+                
+                eo_per_t.append(a_t * eo_t)
+                weights.append(mask.sum().float())
 
           if len(eo_per_t) == 0:
               return torch.tensor(0.0, device=label_pred.device)

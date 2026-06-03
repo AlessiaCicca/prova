@@ -265,6 +265,7 @@ def run_fairness_analysis(
 def main():
     args = parse_args()
     cfg  = load_config(args.config)
+    print(SEED)
 
     out_dir = Path(args.out_dir) if args.out_dir else \
               Path("outputs") / "realData" / args.fair_attr
@@ -294,6 +295,7 @@ def main():
                 "n_epochs":        N_EPOCHS,
                 "lr":              LR,
                 "pw_clip":         PW_CLIP,
+                "seed": SEED,
             }
         )
 

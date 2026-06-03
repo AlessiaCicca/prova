@@ -9,7 +9,7 @@ import torch
 # Device 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Reproducibility
+# Reproducibility 42 | 123 | 456 | 789 | 1234 | 2024 | 314 | 99 | 7 | 2025
 SEED = 42
 
 # Fairness penalty coefficients 
@@ -18,7 +18,7 @@ ALPHA = 1   # M_DYNAMIC EO penalty weight
 
 # EO penalty mode
 # Options: "mean" | "weighted" | "trend_aware" | "weighted+trend"
-EO_MODE_D = "trend_aware"   # dynamic model
+EO_MODE_D = "mean"   # dynamic model
 
 # Time schedule mode (alpha_schedule)
 # Options: "flat" | "decay" | "growth" | "u_shaped" | "early_focus"
