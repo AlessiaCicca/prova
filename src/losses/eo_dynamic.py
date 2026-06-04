@@ -1,7 +1,7 @@
 import torch
 
 def alpha_schedule(epoch, time_val, max_epoch=200, warmup=50,
-                   t_min=1, t_max=12, mode="u_shaped"):
+                   t_min=0, t_max=48, mode="u_shaped"):
     if epoch < warmup:
         f = 0.0
     else:
@@ -9,13 +9,13 @@ def alpha_schedule(epoch, time_val, max_epoch=200, warmup=50,
 
     t_norm = (time_val - t_min) / (t_max - t_min + 1e-9)
     if mode == "decay":
-        g = 1.0 - 0.6 * t_norm
+        g = 1.0 - 0.5 * t_norm
     elif mode == "growth":
-        g = 0.4 + 0.6 * t_norm
+        g = 0.5 + 0.5 * t_norm
     elif mode == "flat":
         g = 1.0
     elif mode == "u_shaped":
-        g = 0.4 + 0.6 * (2 * abs(t_norm - 0.5))
+        g = 0.5 + 0.5 * abs(2*t_norm - 1)
     else:
         raise ValueError(mode)
 

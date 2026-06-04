@@ -17,11 +17,11 @@ BETA  = 0.3   # M_STATIC  EO penalty weight
 ALPHA = 1   # M_DYNAMIC EO penalty weight
 
 # EO penalty mode
-# Options: "mean" | "weighted" | "trend_aware" | "weighted+trend"
+# Options: "mean" | "weighted" | "trend_aware"
 EO_MODE_D = "mean"   # dynamic model
 
 # Time schedule mode (alpha_schedule)
-# Options: "flat" | "decay" | "growth" | "u_shaped" | "early_focus"
+# Options: "flat" | "decay" | "growth" | "u_shaped" 
 SCHEDULE_MODE_D = "flat"
 
 # MLP architecture 
