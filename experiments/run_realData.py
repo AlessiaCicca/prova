@@ -59,7 +59,24 @@ torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
 
-
+def collapse_to_pd12(oof_hazard, event_bin, ids, lmk_vals, n_bins,
+                     complete_only=True):
+    """Da hazard per-bin (OOF) a PD(L, L+horizon) e label y12 per (soggetto, L)."""
+    h = np.clip(oof_hazard, 1e-7, 1 - 1e-7)
+    dfp = pd.DataFrame({
+        "id": ids, "L": lmk_vals,
+        "log1mh": np.log1p(-h),           # log(1 - hazard)
+        "ev": event_bin,
+    })
+    g    = dfp.groupby(["id", "L"], sort=False)
+    surv = np.exp(g["log1mh"].sum())      # prod(1 - h)
+    pd12 = (1.0 - surv).rename("pd12")
+    y12  = g["ev"].max().rename("y12")    # default in QUALCHE bin = default in (L, L+12]
+    cnt  = g.size().rename("n")
+    out  = pd.concat([pd12, y12, cnt], axis=1).reset_index()
+    if complete_only:                      # solo finestre osservate per intero (vero PD-12)
+        out = out[out["n"] == n_bins]
+    return out
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -338,7 +355,7 @@ def main():
         df=df,
         static_cols=STATIC_COLS, tvc_cols=TVC_COLS,
         cat_cols=CAT_COLS, landmarks=cfg["landmarks"],
-        horizon=cfg["horizon"],
+        horizon=cfg["horizon"],delta=cfg.get("delta", 3),  
         id_col="loan_sequence_number", time_col="loan_age",
         first_event_col="FirstDefaultAge",
         sens_col="sens_loan", enc_cat=enc_cat,
@@ -383,6 +400,29 @@ def main():
         model_name="dynamic", n_splits=cfg["n_folds"],
         landmarks=cfg["landmarks"], **train_kwargs,
     )
+    
+    n_bins = cfg["horizon"] // cfg.get("delta", 3)
+
+    pd12_df = collapse_to_pd12(
+        oof_hazard = res_dynamic["oof_preds"],
+        event_bin  = dynamic_data["y"],
+        ids        = dynamic_data["groups"],
+        lmk_vals   = dynamic_data["lmk_vals"],
+        n_bins     = n_bins,
+        complete_only = True,
+    )
+    
+    dyn_pd   = pd12_df["pd12"].to_numpy()
+    dyn_y12  = pd12_df["y12"].to_numpy()
+    dyn_L    = pd12_df["L"].to_numpy()
+    dyn_ids  = pd12_df["id"].to_numpy()
+    
+    # soglia per le decisioni di fairness, ricalcolata sulla PD-12 (non sugli hazard)
+    th_dynamic = find_best_threshold(dyn_y12, dyn_pd)
+    
+    dyn_auc   = roc_auc_score(dyn_y12, dyn_pd)
+    dyn_brier = brier_score_loss(dyn_y12, dyn_pd)
+    print(f"\nM_DYNAMIC (PD-12) AUC={dyn_auc:.4f}  Brier={dyn_brier:.4f}")
 
 
  
@@ -423,16 +463,18 @@ def main():
     th_static  = res_static["threshold"]
     th_dynamic = res_dynamic["threshold"]
 
-    df_agg, df_dyn_lmk, df_auc =run_fairness_analysis(
-        y_static=static_data["y"],
-        static_oof=res_static["oof_preds"],
-        sens_by_attr_static=static_sens_by_attr,
-        y_dynamic=dynamic_data["y"],
-        dynamic_oof=res_dynamic["oof_preds"],
-        sens_by_attr_dynamic=dyn_sens_by_attr,
-        lmk_vals=dynamic_data["lmk_vals"],
-        out_dir=out_dir, cfg=cfg, th_static=th_static,
-        th_dynamic=th_dynamic
+
+
+    df_agg, df_dyn_lmk, df_auc = run_fairness_analysis(
+    y_static=static_data["y"],
+    static_oof=res_static["oof_preds"],
+    sens_by_attr_static=static_sens_by_attr,
+    y_dynamic=dyn_y12,                       # era dynamic_data["y"]
+    dynamic_oof=dyn_pd,                      # era res_dynamic["oof_preds"]
+    sens_by_attr_dynamic=dyn_sens_collapsed, # era dyn_sens_by_attr
+    lmk_vals=dyn_L,                          # era dynamic_data["lmk_vals"]
+    out_dir=out_dir, cfg=cfg,
+    th_static=th_static, th_dynamic=th_dynamic,
     )
 
     if cfg["use_wandb"]:
