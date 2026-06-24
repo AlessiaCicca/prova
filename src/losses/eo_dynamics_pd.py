@@ -1,6 +1,6 @@
 import torch
 
-def alpha_schedule(epoch, time_val, max_epoch=200, warmup=50,
+def alpha_schedule(epoch, time_val, max_epoch=120, warmup=20,
                    t_min=0, t_max=48, mode="u_shaped"):
     if epoch < warmup:
         f = 0.0
@@ -24,7 +24,6 @@ def alpha_schedule(epoch, time_val, max_epoch=200, warmup=50,
     result = f * g
     return result
 
-
 def equalized_odds_loss_dynamic(
     label_pred, sensitive, label_true, time_vals,
     mode="trend_aware",
@@ -46,38 +45,30 @@ def equalized_odds_loss_dynamic(
 
     # ================== COLLAPSE PER-BIN -> PD-12 (Opzione A) ==================
     if group_idx is not None:
-        p = torch.sigmoid(label_pred)                       # hazard di bin
+        p = torch.sigmoid(label_pred)
         n_groups = int(group_idx.max().item()) + 1
 
-        # S = prod(1 - h)  via somma dei log  ->  PD = 1 - S  (differenziabile)
         log_surv = torch.zeros(n_groups, device=device).index_add_(
             0, group_idx, torch.log(1.0 - p + eps))
-        pd = 1.0 - torch.exp(log_surv)                      # PD per (soggetto, L)
+        pd = 1.0 - torch.exp(log_surv)
 
-        # y12 = 1 se default in QUALCHE bin della finestra
         y12 = torch.zeros(n_groups, device=device).index_add_(
             0, group_idx, label_true.float()).clamp(max=1.0)
 
-        # sensitive e landmark per gruppo (costanti dentro il gruppo)
+        # ← SOSTITUISCI le due righe originali con questo:
         sens_g = torch.full((n_groups,), float("nan"), device=device)
-        sens_g[group_idx] = sensitive.float()
+        valid_mask = ~torch.isnan(sensitive)
+        if valid_mask.any():
+            sens_g[group_idx[valid_mask]] = sensitive[valid_mask].float()
+
         lmk_g = torch.zeros(n_groups, device=device)
         lmk_g[group_idx] = time_vals.float()
 
-        # da qui in poi si lavora a livello PD, NON sui bin
-        pred_use  = pd          # GIÀ probabilità in [0,1]  -> NON ri-sigmoidare
+        pred_use  = pd
         true_use  = y12
         sens_use  = sens_g
         time_use  = lmk_g
         already_prob = True
-    else:
-        pred_use  = label_pred
-        true_use  = label_true
-        sens_use  = sensitive
-        time_use  = time_vals
-        already_prob = False
-    # ==========================================================================
-
     if mode == "trend_aware":
         unique_times = torch.sort(torch.unique(time_use)).values
 
@@ -120,8 +111,8 @@ def equalized_odds_loss_dynamic(
             fnr_s1 = torch.sum((1 - lp) * s1 * pos) / (torch.sum(s1 * pos) + eps)
             fnr_s0 = torch.sum((1 - lp) * s0 * pos) / (torch.sum(s0 * pos) + eps)
 
-            fpr_gap = torch.abs(fpr_s1 - fpr_s0)
-            fnr_gap = torch.abs(fnr_s1 - fnr_s0)
+            fpr_gap = torch.abs(fpr_sbar - fpr_s)
+            fnr_gap = torch.abs(fnr_sbar - fnr_s)
             eo_t    = fpr_gap + fnr_gap
 
             if torch.isfinite(eo_t):
@@ -203,7 +194,10 @@ def equalized_odds_loss_dynamic(
             fnr_sbar = torch.sum((1 - lp) * s_bar * pos) / n_sbar_pos
             fnr_s    = torch.sum((1 - lp) * s_    * pos) / n_s_pos
 
-            eo_t = torch.abs((fpr_sbar - fpr_s) + (fnr_sbar - fnr_s))
+            fpr_gap = torch.abs(fpr_sbar - fpr_s)
+            fnr_gap = torch.abs(fnr_sbar - fnr_s)
+            eo_t    = fpr_gap + fnr_gap
+                        
 
             if torch.isfinite(eo_t):
                 a_t = alpha_schedule(
